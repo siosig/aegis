@@ -7,6 +7,7 @@ import {
   listGitVisibleFiles,
   listRepoFiles,
   listRepoRelativeFiles,
+  pathsOutsideListingScope,
   RepoListingError,
   SKIP_DIR_NAMES,
   walkRepoFiles,
@@ -185,5 +186,40 @@ describe('optimization/repo-file-listing', () => {
     write(plainRoot, 'src/b.ts');
     write(plainRoot, 'c.md');
     expect(listRepoRelativeFiles(plainRoot)).toEqual(listRepoFiles(plainRoot).files);
+  });
+});
+
+describe('pathsOutsideListingScope', () => {
+  it('git: returns ignored paths (existing or not) and skipped-dir paths, not visible ones', () => {
+    const root = makeRoot();
+    gitInit(root);
+    write(root, '.gitignore', 'ignored/\n*.log\n');
+    write(root, 'src/a.ts');
+    git(root, ['add', '-A']);
+    const out = pathsOutsideListingScope(
+      root,
+      ['ignored/gone.ts', 'src/gone.log', 'src/a.ts', 'src/gone.ts', 'node_modules/p/i.js'],
+      'git',
+    );
+    expect([...out].sort()).toEqual(['ignored/gone.ts', 'node_modules/p/i.js', 'src/gone.log']);
+  });
+
+  it('git: a tracked file matching an ignore pattern stays in scope (ls-files --cached lists it)', () => {
+    const root = makeRoot();
+    gitInit(root);
+    write(root, 'keep.log');
+    git(root, ['add', '-A']);
+    write(root, '.gitignore', '*.log\n');
+    expect(pathsOutsideListingScope(root, ['keep.log'], 'git').size).toBe(0);
+  });
+
+  it('walk: only skipped-dir paths are out of scope', () => {
+    const root = makeRoot();
+    const out = pathsOutsideListingScope(root, ['dist/x.js', 'src/x.ts'], 'walk');
+    expect([...out]).toEqual(['dist/x.js']);
+  });
+
+  it('empty input returns an empty set', () => {
+    expect(pathsOutsideListingScope(makeRoot(), [], 'git').size).toBe(0);
   });
 });

@@ -523,19 +523,51 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
       ]);
     });
 
-    it('(b) file deleted: linked_file_removed is reported', () => {
+    it('(b) git-ignored file deleted: no finding, baseline rewritten once', () => {
       const { root, run } = setup({ ignoredGlob: 'ignored/**' });
       rmSync(join(root, 'ignored/x.ts'));
-      const removed = run().findings.filter((f) => f.kind === 'linked_file_removed');
-      expect(removed).toHaveLength(1);
-      expect(removed[0]?.paths).toEqual(['ignored/x.ts']);
+      const r = run();
+      expect(r.findings).toHaveLength(0);
+      expect(r.baselineUpserts).toHaveLength(1);
+      expect(Object.keys(JSON.parse(r.baselineUpserts[0]!.fingerprint_json) as Record<string, string>)).toEqual([
+        'src/keep.ts',
+      ]);
     });
 
-    it('(c) edge glob no longer matches the path: linked_file_removed is reported', () => {
+    it('(c) git-ignored file whose edge glob no longer matches: no finding', () => {
       const { run } = setup({ ignoredGlob: 'other/**' });
-      const removed = run().findings.filter((f) => f.kind === 'linked_file_removed');
-      expect(removed).toHaveLength(1);
-      expect(removed[0]?.paths).toEqual(['ignored/x.ts']);
+      expect(run().findings).toHaveLength(0);
+    });
+
+    it('(d) path in a skipped directory deleted: no finding', () => {
+      const root = makeGitFixture({ 'src/keep.ts': keepBody });
+      const keepFp = fingerprintEdgeLinkedArtifacts(root, ['src/keep.ts']);
+      const baselineJson = stableStringifyFingerprints({ ...keepFp, 'node_modules/pkg/index.js': 'raw:gone' });
+      const r = collectSemanticStalenessFindings({
+        docs: [approvedDoc('d1')],
+        edges: [pathEdge('e1', '**', 'd1')],
+        projectRoot: root,
+        getBaseline: () => baselineJson,
+        persistLevel3Baselines: true,
+      });
+      expect(r.findings).toHaveLength(0);
+      expect(r.baselineUpserts).toHaveLength(1);
+    });
+
+    it('(e) visible (not ignored) file deleted: linked_file_removed is reported', () => {
+      const root = makeGitFixture({ '.gitignore': 'ignored/\n', 'src/keep.ts': keepBody, 'src/gone.ts': 'x\n' });
+      const fp = fingerprintEdgeLinkedArtifacts(root, ['src/gone.ts', 'src/keep.ts']);
+      rmSync(join(root, 'src/gone.ts'));
+      const r = collectSemanticStalenessFindings({
+        docs: [approvedDoc('d1')],
+        edges: [pathEdge('e1', 'src/**', 'd1')],
+        projectRoot: root,
+        getBaseline: () => stableStringifyFingerprints(fp),
+        persistLevel3Baselines: true,
+      });
+      const removed = r.findings.filter((f) => f.kind === 'linked_file_removed');
+      expect(removed.map((f) => f.paths)).toEqual([['src/gone.ts']]);
+      expect(r.baselineUpserts).toHaveLength(0);
     });
   });
 

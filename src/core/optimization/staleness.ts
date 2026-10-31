@@ -13,7 +13,7 @@ import picomatch from 'picomatch';
 import { resolveSourcePath } from '../paths.js';
 import { parseSourceRefsJson, sourceRefCountFromDocument } from '../source-refs.js';
 import type { Document, Edge, StalenessDetectedPayload } from '../types.js';
-import { listRepoFiles, type RepoListingSource } from './repo-file-listing.js';
+import { listRepoFiles, pathsOutsideListingScope, type RepoListingSource } from './repo-file-listing.js';
 
 export { listRepoRelativeFiles } from './repo-file-listing.js';
 
@@ -397,6 +397,11 @@ export function collectSemanticStalenessFindings(input: SemanticStalenessScanInp
 
     const keys = new Set([...Object.keys(prevObj), ...Object.keys(currentMap)]);
     const sortedKeys = [...keys].sort((a, b) => a.localeCompare(b));
+    // Baseline paths the current listing can never contain (git-ignored or in a skipped directory) are out of
+    // scope, even when deleted: e.g. a baseline captured by the pre-git directory walk still holds `.venv/` files.
+    // Reporting them would keep `drift` true forever, so the baseline would never be refreshed.
+    const goneKeys = sortedKeys.filter((k) => prevObj[k] !== undefined && currentMap[k] === undefined);
+    const outOfScope = pathsOutsideListingScope(input.projectRoot, goneKeys, listing.source);
     let drift = false;
     for (const k of sortedKeys) {
       const a = prevObj[k];
@@ -413,7 +418,7 @@ export function collectSemanticStalenessFindings(input: SemanticStalenessScanInp
           }),
         );
       } else if (a !== undefined && b === undefined) {
-        if (movedOutOfScan(k, linkedSet, fileSet, matchers, input.projectRoot)) continue;
+        if (outOfScope.has(k) || movedOutOfScan(k, linkedSet, fileSet, matchers, input.projectRoot)) continue;
         drift = true;
         findings.push(
           finding({

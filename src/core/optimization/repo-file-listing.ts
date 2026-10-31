@@ -168,6 +168,45 @@ export function listRepoFiles(projectRoot: string): RepoFileListing {
   return { files: walkRepoFiles(projectRoot), source: 'walk' };
 }
 
+/**
+ * Returns the subset of `paths` (repo-relative, posix) that the listing excludes by scope, whether or not the
+ * file still exists: a path with a SKIP_DIR_NAMES segment, or (source 'git') a path git ignores.
+ * A failing `git check-ignore` contributes nothing, so callers keep treating those paths as in scope.
+ */
+export function pathsOutsideListingScope(
+  projectRoot: string,
+  paths: readonly string[],
+  source: RepoListingSource,
+): Set<string> {
+  const out = new Set<string>();
+  const rest: string[] = [];
+  for (const p of paths) {
+    if (p.split('/').some((seg) => SKIP_DIR_NAMES.has(seg))) out.add(p);
+    else rest.push(p);
+  }
+  if (source !== 'git' || rest.length === 0) return out;
+
+  let stdout: string;
+  try {
+    stdout = execFileSync('git', ['check-ignore', '-z', '--stdin'], {
+      cwd: projectRoot,
+      encoding: 'utf-8',
+      input: `${rest.join('\0')}\0`,
+      maxBuffer: GIT_LS_FILES_MAX_BUFFER,
+      timeout: GIT_LS_FILES_TIMEOUT_MS,
+      stdio: ['pipe', 'pipe', 'ignore'],
+      env: gitEnv(),
+    });
+  } catch {
+    // exit 1: none of the paths is ignored. Any other failure: report nothing as ignored.
+    return out;
+  }
+  for (const p of stdout.split('\0')) {
+    if (p.length > 0) out.add(p);
+  }
+  return out;
+}
+
 /** Backward-compatible: `listRepoFiles(projectRoot).files`. */
 export function listRepoRelativeFiles(projectRoot: string): string[] {
   return listRepoFiles(projectRoot).files;
