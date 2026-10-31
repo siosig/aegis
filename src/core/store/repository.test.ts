@@ -2530,6 +2530,21 @@ describe('Repository', () => {
       repo.approveProposal('p-boot-sb');
       repo.upsertStalenessBaseline('doc-a', '{"a/x.ts":"h"}');
       repo.upsertStalenessBaseline('doc-b', '{"b/y.ts":"h"}');
+      for (const docId of ['doc-a', 'doc-b']) {
+        repo.insertObservation({
+          observation_id: `o-l3-${docId}`,
+          event_type: 'staleness_detected',
+          payload: JSON.stringify({
+            doc_id: docId,
+            level: 3,
+            kind: 'linked_file_added',
+            detail: 'x',
+            algorithm_version: 1,
+          }),
+          related_compile_id: null,
+          related_snapshot_id: null,
+        });
+      }
     }
 
     function approve(
@@ -2560,6 +2575,8 @@ describe('Repository', () => {
       });
       expect(repo.getStalenessBaseline('doc-a')).toBeNull();
       expect(repo.getStalenessBaseline('doc-b')).toBe('{"b/y.ts":"h"}');
+      expect(repo.countUnarchivedLevel3StalenessObservationsForDocs(['doc-a'])).toBe(0);
+      expect(repo.countUnarchivedLevel3StalenessObservationsForDocs(['doc-b'])).toBe(1);
     });
 
     it('retarget_edge drops the baselines of both the old and the new target', () => {
@@ -2567,16 +2584,18 @@ describe('Repository', () => {
       approve('p-rt-sb', 'retarget_edge', { edge_id: 'e-a', target_doc_id: 'doc-b' });
       expect(repo.getStalenessBaseline('doc-a')).toBeNull();
       expect(repo.getStalenessBaseline('doc-b')).toBeNull();
+      expect(repo.countUnarchivedLevel3StalenessObservationsForDocs(['doc-a', 'doc-b'])).toBe(0);
     });
 
     it('remove_edge drops the target document baseline', () => {
       bootstrapTwoDocs();
       approve('p-rm-sb', 'remove_edge', { edge_id: 'e-a' });
       expect(repo.getStalenessBaseline('doc-a')).toBeNull();
+      expect(repo.countUnarchivedLevel3StalenessObservationsForDocs(['doc-a'])).toBe(0);
       expect(repo.getStalenessBaseline('doc-b')).toBe('{"b/y.ts":"h"}');
     });
 
-    it('doc_depends_on edge changes keep baselines', () => {
+    it('doc_depends_on edge changes keep baselines and observations', () => {
       bootstrapTwoDocs();
       approve('p-dep-sb', 'add_edge', {
         edge_id: 'e-dep',
@@ -2588,6 +2607,7 @@ describe('Repository', () => {
         specificity: 0,
       });
       expect(repo.getStalenessBaseline('doc-a')).toBe('{"a/x.ts":"h"}');
+      expect(repo.countUnarchivedLevel3StalenessObservationsForDocs(['doc-a'])).toBe(1);
     });
   });
 

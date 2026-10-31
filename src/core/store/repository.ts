@@ -444,10 +444,12 @@ export class Repository {
   }
 
   /**
-   * Drops the Level-3 baseline of the documents a path edge routes to. The baseline's key set is defined by the
-   * doc's `path_requires`/`path` edges, so an approved edge change makes it stale; the next maintenance re-captures
-   * it without findings. Without this, drift caused by an edge change would be reported forever, because the
-   * baseline is only refreshed on a run with no drift.
+   * Drops the Level-3 baseline of the documents a path edge routes to and archives their Level-3
+   * `staleness_detected` observations. The baseline's key set is defined by the doc's `path_requires`/`path` edges,
+   * so an approved edge change makes it stale; the next maintenance re-captures it without findings. Without this,
+   * drift caused by an edge change would be reported forever, because the baseline is only refreshed on a run with
+   * no drift. The observations describe drift against the dropped baseline; left unarchived, they would also stop
+   * maintenance from recording an identical finding later (it dedupes against unarchived payloads).
    */
   private _invalidateStalenessBaselinesForPathEdge(
     edge: Pick<Edge, 'edge_type' | 'source_type'>,
@@ -455,9 +457,11 @@ export class Repository {
   ): void {
     if (edge.edge_type !== 'path_requires' || edge.source_type !== 'path') return;
     const stmt = this.db.prepare('DELETE FROM staleness_baselines WHERE doc_id = ?');
-    for (const docId of new Set(targetDocIds)) {
+    const docIds = [...new Set(targetDocIds)];
+    for (const docId of docIds) {
       stmt.run(docId);
     }
+    this.archiveLevel3StalenessObservationsForDocs(docIds);
   }
 
   setDocumentTemplateOrigin(docId: string, origin: string): void {
