@@ -409,6 +409,7 @@ HuggingFace URI を直接指定することも可能: `--model hf:user/repo:file
 | `deploy-adapters` | IDE アダプタ設定（Cursor ルール、CLAUDE.md、AGENTS.md）と Agent Skills をデプロイ |
 | `maintenance` | オブザベーション処理、ドキュメント同期、アーカイブ、アップグレードチェックを実行し、最後に DB の圧縮（`db_compaction`）を行う |
 | `approve-pending` | 保留中のプロポーザルを種類ごとに一括承認（`--types <t1,t2,...>` で種類を絞り込み、`--dry-run` で承認対象の列挙のみ）。admin 専用の CLI で、MCP ツールとしては公開しない（INV-6） |
+| `staleness-ack` | 確認済みの Level 3 の staleness を確定する（`--doc-ids <id1,id2,...>` か `--all`、`--dry-run` で報告のみ）。文書の基準値を今のファイルから取り直し、その文書の Level 3 の `staleness_detected` 観測をアーカイブする。admin 専用の CLI で、MCP ツールとしては公開しない（INV-6） |
 | `stats` | ナレッジ集計、利用状況、ヘルス、プロジェクト共有ステータスの JSON 出力 |
 | `doctor` | ヘルスチェックの人間可読サマリー（問題があれば exit 1） |
 | `share-export` | 承認済み Canonical Knowledge を `aegis-share/` にエクスポート |
@@ -427,6 +428,7 @@ npx @fuwasegu/aegis maintenance                             # オブザベーシ
 npx @fuwasegu/aegis maintenance --dry-run                   # レポートのみ（書き込みなし）
 npx @fuwasegu/aegis approve-pending --dry-run               # 承認対象の列挙のみ（DB は変更しない）
 npx @fuwasegu/aegis approve-pending --types new_doc,add_edge  # 指定した種類だけを一括承認
+npx @fuwasegu/aegis staleness-ack --doc-ids plan,spec       # 確認済みのコードのドリフトを確定
 npx @fuwasegu/aegis stats                                   # JSON ヘルス・利用状況データ
 npx @fuwasegu/aegis doctor                                  # ヘルスチェックサマリー
 npx @fuwasegu/aegis share-export                            # aegis-share/ にエクスポート
@@ -442,6 +444,7 @@ npx @fuwasegu/aegis --list-models                           # 利用可能な SL
 #### 運用上の注意
 
 - **`approve-pending` の出力:** 標準出力に JSON を 1 つ（`approved`、`would_approve`、`rejected`、`would_reject`、`skipped`、`failed`）、診断を標準エラーに出力します。バンドルに属する提案（`bundle_id`）は `reason: bundled` で skipped にするため、`aegis_approve_proposal_bundle` で承認してください。同じ文書（`doc_id`）に pending の `update_doc` が複数あるときは、最も新しいもの（`created_at` が最後）だけを承認の候補にし、それより古いものは `reason: superseded` で却下します。最も新しいものも、内容が現在のソースファイル（`source_path`）と一致しなければ `reason: stale_content` で却下します（ソースファイルが無い文書は内容を比べずに承認します）。却下した提案は `rejected`（`--dry-run` では `would_reject`）に載り、その根拠の観測は再分析の対象に戻しません。バンドルに属する `update_doc` はこの選別の対象外です。すでに pending でない提案（別プロセスが先に承認した場合など）も `reason: no_longer_pending` の skipped になり、失敗には数えません。終了コードは、完了で `0`、承認の失敗を含むと `1`（成功した承認は残り、標準出力の JSON は最後まで出力されます）、使い方の誤りまたは DB を開けない場合は `2` です。
+- **`staleness-ack`:** 文書がドリフトしたコードと今も合っている（または文書を直した）ことを確かめた後に実行します。`maintenance` はドリフトの無い回にしか基準値を書き直さないため、確定しない限り同じ指摘が出続けます。標準出力に JSON を 1 つ（`dry_run`、種類ごとの Level 3 の指摘の件数と新しい基準値のパス数を持つ `acknowledged`、`reason: no_linked_paths | source_unreadable` の `skipped`、`archived_observations`）出力します。Level 1〜2（文書とそのソースファイルの差）は対象外で、`sync_docs` で解消します。承認済みでない `doc_id` は、書き込みの前にエラーにします。終了コードは、完了で `0`、使い方の誤り・未知の `doc_id`・DB を開けない場合は `2` です。
 - **staleness の検査対象:** `git ls-files`（追跡ファイル + 未追跡かつ `.gitignore` 対象外のファイル）に基づきます。git が使えない場合（git 未導入、git の作業ツリーの外、またはプロジェクトのルート自体が上位リポジトリの設定で無視されている場合）は従来の再帰走査に切り替わります。
 - **スナップショットの保持世代:** 環境変数 `AEGIS_SNAPSHOT_RETENTION`（既定 `20`、正の整数）で、保持する直近の世代数を指定します。不正な値の場合は警告を出して既定値 `20` を使います。
 - **DB の圧縮:** `maintenance` の `db_compaction` は、DB の空き領域が 1 MiB 以上かつ 25% 以上のときに限り、`maintenance` の最後に `VACUUM` を実行します（`--dry-run` では判定のみで実行しません）。

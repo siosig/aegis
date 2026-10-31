@@ -51,6 +51,11 @@ import {
   collectSemanticStalenessFindings,
   SEMANTIC_STALENESS_ALGORITHM_VERSION,
 } from '../core/optimization/staleness.js';
+import {
+  acknowledgeStaleness,
+  type StalenessAckOptions,
+  type StalenessAckResult,
+} from '../core/optimization/staleness-ack.js';
 import { normalizeSourcePath, resolveSourcePath } from '../core/paths.js';
 import { deriveShareState } from '../core/project-share/status.js';
 import { ContextCompiler } from '../core/read/compiler.js';
@@ -593,6 +598,12 @@ export class AegisService {
   approvePending(options: ApprovePendingOptions, surface: Surface): ApprovePendingResult {
     this.assertAdmin('aegis_approve_pending', surface);
     return approvePendingProposals(this.repo, options, this.projectRoot);
+  }
+
+  /** Admin only. Not registered as an MCP tool (CLI `staleness-ack` only). */
+  ackStaleness(options: StalenessAckOptions, surface: Surface): StalenessAckResult {
+    this.assertAdmin('aegis_staleness_ack', surface);
+    return acknowledgeStaleness(this.repo, this.projectRoot, options);
   }
 
   rejectProposal(proposalId: string, reason: string, surface: Surface): { proposal_id: string; status: 'rejected' } {

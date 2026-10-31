@@ -875,7 +875,9 @@ describe('CLI — approve-pending (dist/main.js)', () => {
     expect(result.approved).toEqual([]);
     expect(result.dry_run).toBe(false);
     const lines = r.stderr.trim().split('\n');
-    expect(lines[lines.length - 1]).toBe('[aegis] approve-pending: approved=0 failed=0 rejected=0 skipped=0 (dry_run=false)');
+    expect(lines[lines.length - 1]).toBe(
+      '[aegis] approve-pending: approved=0 failed=0 rejected=0 skipped=0 (dry_run=false)',
+    );
   }, 15_000);
 
   it('--dry-run lists a pending new_doc in would_approve and leaves it pending', async () => {
@@ -968,4 +970,88 @@ describe('CLI — approve-pending (dist/main.js)', () => {
     const result = JSON.parse(r.stdout) as { failed: unknown[] };
     expect(result.failed).toHaveLength(count);
   }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// `staleness-ack` subcommand (admin CLI only). Requires `pnpm run build` beforehand.
+// ---------------------------------------------------------------------------
+
+describe('CLI — staleness-ack (dist/main.js)', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), 'aegis-cli-ack-'));
+    mkdirSync(join(root, 'src'), { recursive: true });
+    writeFileSync(join(root, 'src', 'a.ts'), 'export function A() {}\n', 'utf-8');
+    const init = spawnSync('git', ['init', '--quiet'], { cwd: root, encoding: 'utf-8' });
+    expect(init.status, `git init stderr: ${init.stderr}`).toBe(0);
+    mkdirSync(join(root, '.aegis'), { recursive: true });
+    const db = await createDatabase(join(root, '.aegis', 'aegis.db'));
+    const repo = new Repository(db);
+    repo.insertProposal({
+      proposal_id: 'p-boot',
+      proposal_type: 'bootstrap',
+      payload: JSON.stringify({
+        documents: [{ doc_id: 'doc-a', title: 'A', kind: 'guideline', content: 'a', content_hash: hash('a') }],
+        edges: [
+          {
+            edge_id: 'e-a',
+            source_type: 'path',
+            source_value: 'src/**',
+            target_doc_id: 'doc-a',
+            edge_type: 'path_requires',
+            priority: 100,
+            specificity: 0,
+          },
+        ],
+        layer_rules: [],
+      }),
+      status: 'pending',
+      review_comment: null,
+    });
+    repo.approveProposal('p-boot');
+    db.close();
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('exits 2 on usage errors: neither or both of --doc-ids/--all, unknown flag, missing value', () => {
+    const base = ['staleness-ack', '--project-root', root];
+    expect(runCli(base).status).toBe(2);
+    expect(runCli([...base, '--all', '--doc-ids', 'doc-a']).status).toBe(2);
+    expect(runCli([...base, '--all', '--bogus']).status).toBe(2);
+    expect(runCli([...base, '--doc-ids']).status).toBe(2);
+    expect(runCli([...base, '--doc-ids', ',']).status).toBe(2);
+  }, 30_000);
+
+  it('exits 2 for a doc_id that is not an approved document', () => {
+    const r = runCli(['staleness-ack', '--project-root', root, '--doc-ids', 'nope']);
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('nope');
+  }, 30_000);
+
+  it('prints the result JSON and writes the baseline (none in dry-run)', async () => {
+    const dry = runCli(['staleness-ack', '--project-root', root, '--doc-ids', 'doc-a', '--dry-run']);
+    expect(dry.status, `stderr: ${dry.stderr}`).toBe(0);
+    const dryResult = JSON.parse(dry.stdout) as { dry_run: boolean; acknowledged: Array<{ doc_id: string }> };
+    expect(dryResult.dry_run).toBe(true);
+    expect(dryResult.acknowledged.map((a) => a.doc_id)).toEqual(['doc-a']);
+
+    const readBaseline = async (): Promise<string | null> => {
+      const db = await createDatabase(join(root, '.aegis', 'aegis.db'));
+      try {
+        return new Repository(db).getStalenessBaseline('doc-a');
+      } finally {
+        db.close();
+      }
+    };
+    expect(await readBaseline()).toBeNull();
+
+    const r = runCli(['staleness-ack', '--project-root', root, '--all']);
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    expect(JSON.parse(r.stdout)).toMatchObject({ dry_run: false, skipped: [], archived_observations: 0 });
+    expect(await readBaseline()).toContain('src/a.ts');
+  }, 30_000);
 });

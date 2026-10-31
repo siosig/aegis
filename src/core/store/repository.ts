@@ -1170,6 +1170,47 @@ export class Repository {
     return result.changes;
   }
 
+  /** Unarchived Level-3 `staleness_detected` observations for the given doc_ids (CLI `staleness-ack`). */
+  countUnarchivedLevel3StalenessObservationsForDocs(docIds: readonly string[]): number {
+    if (docIds.length === 0) return 0;
+    const placeholders = docIds.map(() => '?').join(',');
+    const row = this.db
+      .prepare(
+        `
+      SELECT COUNT(*) AS n FROM observations
+      WHERE event_type = 'staleness_detected'
+        AND archived_at IS NULL
+        AND json_extract(payload, '$.level') = 3
+        AND json_extract(payload, '$.doc_id') IN (${placeholders})
+    `,
+      )
+      .get(...docIds) as { n: number };
+    return row.n;
+  }
+
+  /**
+   * Archives the unarchived Level-3 `staleness_detected` observations for the given doc_ids (CLI `staleness-ack`).
+   * Without this, an identical finding after the acknowledgement would be deduplicated against the old row and never
+   * recorded. `StalenessAnalyzer` creates no proposals, so no pending proposal can reference these rows.
+   */
+  archiveLevel3StalenessObservationsForDocs(docIds: readonly string[]): number {
+    if (docIds.length === 0) return 0;
+    const placeholders = docIds.map(() => '?').join(',');
+    const result = this.db
+      .prepare(
+        `
+      UPDATE observations
+      SET archived_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      WHERE event_type = 'staleness_detected'
+        AND archived_at IS NULL
+        AND json_extract(payload, '$.level') = 3
+        AND json_extract(payload, '$.doc_id') IN (${placeholders})
+    `,
+      )
+      .run(...docIds);
+    return result.changes;
+  }
+
   getCompileLog(compileId: string): CompileLog | undefined {
     return this.db.prepare('SELECT * FROM compile_log WHERE compile_id = ?').get(compileId) as CompileLog | undefined;
   }

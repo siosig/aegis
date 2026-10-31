@@ -409,6 +409,7 @@ You can also pass a HuggingFace URI directly: `--model hf:user/repo:file.gguf`
 | `deploy-adapters` | Deploy IDE adapter configurations (Cursor rules, CLAUDE.md, AGENTS.md) and Agent Skills |
 | `maintenance` | Run observation processing, doc sync, archive, and upgrade check |
 | `approve-pending` | Approve all pending proposals in one run (`--types <t1,t2,...>` limits proposal types, `--dry-run` lists what would be approved without changing the DB). Admin-only: not exposed over MCP (INV-6) |
+| `staleness-ack` | Acknowledge reviewed Level-3 staleness (`--doc-ids <id1,id2,...>` or `--all`, `--dry-run` reports only): re-capture the documents' baselines from the current files and archive their Level-3 `staleness_detected` observations. Admin-only: not exposed over MCP (INV-6) |
 | `stats` | JSON output of knowledge counts, usage, health, and project share status |
 | `doctor` | Human-readable health check (exits 1 if issues found) |
 | `share-export` | Export approved Canonical Knowledge to `aegis-share/` |
@@ -427,6 +428,7 @@ npx @fuwasegu/aegis maintenance                             # Process observatio
 npx @fuwasegu/aegis maintenance --dry-run                   # Report only (no writes)
 npx @fuwasegu/aegis approve-pending --dry-run               # List pending proposals that would be approved
 npx @fuwasegu/aegis approve-pending --types new_doc,add_edge  # Approve only these proposal types
+npx @fuwasegu/aegis staleness-ack --doc-ids plan,spec       # Accept reviewed code drift for these documents
 npx @fuwasegu/aegis stats                                   # JSON health and usage data
 npx @fuwasegu/aegis doctor                                  # Health check summary
 npx @fuwasegu/aegis share-export                            # Export to aegis-share/
@@ -440,6 +442,8 @@ npx @fuwasegu/aegis --list-models                           # List available SLM
 ```
 
 `approve-pending` prints one JSON document (`approved`, `would_approve`, `rejected`, `would_reject`, `skipped`, `failed`) to stdout and diagnostics to stderr. Proposals that belong to a bundle (`bundle_id`) are skipped (`reason: bundled`); approve those with `aegis_approve_proposal_bundle`. When a document (`doc_id`) has several pending `update_doc` proposals, only the newest one (latest `created_at`) is a candidate; the older ones are rejected with `reason: superseded`. The newest one is also rejected, with `reason: stale_content`, when its content does not match the current source file (`source_path`); a document without a source file is approved without the comparison. Rejected proposals are listed in `rejected` (`would_reject` with `--dry-run`), and their evidence observations are not queued for re-analysis. Bundled `update_doc` proposals are not part of this selection. Proposals that are no longer pending (for example, approved by another process first) are also skipped (`reason: no_longer_pending`) and do not count as failures. Exit codes: `0` on completion, `1` if any approval failed (approvals that succeeded stay applied; the JSON on stdout is still written in full), `2` on a usage error or when the database cannot be opened.
+
+`staleness-ack` prints one JSON document (`dry_run`, `acknowledged` with Level-3 finding counts per kind and the new baseline's path count, `skipped` with `reason: no_linked_paths | source_unreadable`, `archived_observations`) to stdout. Run it after you have confirmed that the documents still describe the drifted code (or have updated them): `maintenance` refreshes a baseline only on a run with no drift, so reported drift otherwise stays reported. Levels 1–2 (document vs. its source file) are not affected; `sync_docs` resolves them. An unknown or non-approved `doc_id` is an error before any write. Exit codes: `0` on completion, `2` on a usage error, an unknown `doc_id`, or when the database cannot be opened.
 
 #### Maintenance details
 

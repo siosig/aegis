@@ -21,6 +21,8 @@
  *   npx aegis approve-pending                    # Approve all pending proposals (admin CLI only; not an MCP tool)
  *   npx aegis approve-pending --dry-run          # List what would be approved (no writes)
  *   npx aegis approve-pending --types new_doc,add_edge
+ *   npx aegis staleness-ack --doc-ids a,b        # Accept reviewed Level-3 drift: re-capture baselines (admin CLI only)
+ *   npx aegis staleness-ack --all --dry-run      # List what would be acknowledged (no writes)
  *   npx aegis stats                              # JSON: knowledge / usage / health (read-only; no DB writes)
  *   npx aegis doctor                             # Health summary; read-only; exits 1 if issues
  *   npx aegis share-export                       # Export approved Canonical to aegis-share/
@@ -598,6 +600,115 @@ async function handleApprovePending(): Promise<void> {
   }
 }
 
+export interface StalenessAckCli {
+  projectRoot: string;
+  dbPath: string;
+  templatesRoot: string;
+  extraTemplateDirs: string[];
+  /** null means `--all`. */
+  docIds: string[] | null;
+  dryRun: boolean;
+}
+
+/** Parses `staleness-ack` arguments strictly: exactly one of `--doc-ids` / `--all`; unknown flags throw. */
+export function parseStalenessAckCli(args: string[]): StalenessAckCli {
+  let projectRoot = resolve(process.cwd());
+  let customDbPath: string | undefined;
+  let templatesRoot = join(SCRIPT_DIR, '../templates');
+  const extraTemplateDirs: string[] = [];
+  let docIds: string[] | undefined;
+  let all = false;
+  let dryRun = false;
+
+  const takeValue = (flag: string, index: number): string => {
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`${flag} requires a value`);
+    }
+    return value;
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    switch (flag) {
+      case '--dry-run':
+        dryRun = true;
+        break;
+      case '--all':
+        all = true;
+        break;
+      case '--doc-ids':
+        docIds = takeValue(flag, i)
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0);
+        if (docIds.length === 0) throw new Error('--doc-ids requires at least one doc_id');
+        i++;
+        break;
+      case '--project-root':
+        projectRoot = resolve(takeValue(flag, i));
+        i++;
+        break;
+      case '--db':
+        customDbPath = takeValue(flag, i);
+        i++;
+        break;
+      case '--templates':
+        templatesRoot = takeValue(flag, i);
+        i++;
+        break;
+      case '--template-dir':
+        extraTemplateDirs.push(takeValue(flag, i));
+        i++;
+        break;
+      default:
+        throw new Error(`Unknown option: ${flag}`);
+    }
+  }
+
+  if (all === (docIds !== undefined)) {
+    throw new Error('specify exactly one of --doc-ids <id1,id2,...> or --all');
+  }
+
+  return {
+    projectRoot,
+    dbPath: customDbPath ?? join(projectRoot, DEFAULT_DB_PATH),
+    templatesRoot,
+    extraTemplateDirs,
+    docIds: docIds ?? null,
+    dryRun,
+  };
+}
+
+async function handleStalenessAck(): Promise<void> {
+  let cli: StalenessAckCli;
+  try {
+    cli = parseStalenessAckCli(process.argv.slice(3));
+  } catch (err) {
+    console.error(`[aegis] staleness-ack: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(2);
+  }
+
+  if (!existsSync(cli.dbPath)) {
+    console.error(`[aegis] Database not found at ${cli.dbPath}`);
+    process.exit(2);
+  }
+
+  try {
+    const db = await createDatabase(cli.dbPath);
+    const repo = new Repository(db);
+    const service = new AegisService(repo, cli.templatesRoot, null, cli.extraTemplateDirs, false, cli.projectRoot);
+    const result = service.ackStaleness({ docIds: cli.docIds, dryRun: cli.dryRun }, 'admin');
+    console.log(JSON.stringify(result, null, 2));
+    console.error(
+      `[aegis] staleness-ack: acknowledged=${result.acknowledged.length} skipped=${result.skipped.length} archived_observations=${result.archived_observations} (dry_run=${result.dry_run})`,
+    );
+  } catch (err) {
+    console.error(`[aegis] staleness-ack: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    process.exit(2);
+  }
+}
+
 async function handleStats(): Promise<void> {
   const opts = parseStatsDoctorCli(process.argv.slice(3));
   const service = await openServiceForStatsDoctor(opts);
@@ -997,6 +1108,11 @@ async function main() {
 
   if (subcommand === 'approve-pending') {
     await handleApprovePending();
+    return;
+  }
+
+  if (subcommand === 'staleness-ack') {
+    await handleStalenessAck();
     return;
   }
 
