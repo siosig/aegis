@@ -443,6 +443,23 @@ export class Repository {
       .run(docId, fingerprintJson);
   }
 
+  /**
+   * Drops the Level-3 baseline of the documents a path edge routes to. The baseline's key set is defined by the
+   * doc's `path_requires`/`path` edges, so an approved edge change makes it stale; the next maintenance re-captures
+   * it without findings. Without this, drift caused by an edge change would be reported forever, because the
+   * baseline is only refreshed on a run with no drift.
+   */
+  private _invalidateStalenessBaselinesForPathEdge(
+    edge: Pick<Edge, 'edge_type' | 'source_type'>,
+    targetDocIds: readonly string[],
+  ): void {
+    if (edge.edge_type !== 'path_requires' || edge.source_type !== 'path') return;
+    const stmt = this.db.prepare('DELETE FROM staleness_baselines WHERE doc_id = ?');
+    for (const docId of new Set(targetDocIds)) {
+      stmt.run(docId);
+    }
+  }
+
   setDocumentTemplateOrigin(docId: string, origin: string): void {
     this.db.prepare('UPDATE documents SET template_origin = ? WHERE doc_id = ?').run(origin, docId);
   }
@@ -1862,6 +1879,7 @@ export class Repository {
       );
     }
     this.insertEdge({ ...payload, status: 'approved' });
+    this._invalidateStalenessBaselinesForPathEdge(payload, [payload.target_doc_id]);
   }
 
   /**
@@ -1950,6 +1968,7 @@ export class Repository {
     this.db
       .prepare('UPDATE edges SET source_value = ?, target_doc_id = ? WHERE edge_id = ?')
       .run(newSource, newTarget, edgeId);
+    this._invalidateStalenessBaselinesForPathEdge(existing, [existing.target_doc_id, newTarget]);
   }
 
   private _applyRemoveEdge(payload: Record<string, unknown>): void {
@@ -1965,6 +1984,7 @@ export class Repository {
       throw new Error(`remove_edge: edge '${edgeId}' is not approved (status: ${existing.status})`);
     }
     this.db.prepare('DELETE FROM edges WHERE edge_id = ?').run(edgeId);
+    this._invalidateStalenessBaselinesForPathEdge(existing, [existing.target_doc_id]);
   }
 
   /**

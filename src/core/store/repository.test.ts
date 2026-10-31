@@ -2501,6 +2501,96 @@ describe('Repository', () => {
     });
   });
 
+  describe('Staleness baselines on approved edge changes', () => {
+    function bootstrapTwoDocs(): void {
+      repo.insertProposal({
+        proposal_id: 'p-boot-sb',
+        proposal_type: 'bootstrap',
+        payload: JSON.stringify({
+          documents: [
+            { doc_id: 'doc-a', title: 'A', kind: 'guideline', content: 'a', content_hash: hash('a') },
+            { doc_id: 'doc-b', title: 'B', kind: 'guideline', content: 'b', content_hash: hash('b') },
+          ],
+          edges: [
+            {
+              edge_id: 'e-a',
+              source_type: 'path',
+              source_value: 'a/**',
+              target_doc_id: 'doc-a',
+              edge_type: 'path_requires',
+              priority: 100,
+              specificity: 0,
+            },
+          ],
+          layer_rules: [],
+        }),
+        status: 'pending',
+        review_comment: null,
+      });
+      repo.approveProposal('p-boot-sb');
+      repo.upsertStalenessBaseline('doc-a', '{"a/x.ts":"h"}');
+      repo.upsertStalenessBaseline('doc-b', '{"b/y.ts":"h"}');
+    }
+
+    function approve(
+      proposalId: string,
+      proposalType: 'add_edge' | 'retarget_edge' | 'remove_edge',
+      payload: object,
+    ): void {
+      repo.insertProposal({
+        proposal_id: proposalId,
+        proposal_type: proposalType,
+        payload: JSON.stringify(payload),
+        status: 'pending',
+        review_comment: null,
+      });
+      repo.approveProposal(proposalId);
+    }
+
+    it('add_edge (path_requires) drops only the target document baseline', () => {
+      bootstrapTwoDocs();
+      approve('p-add-sb', 'add_edge', {
+        edge_id: 'e-a2',
+        source_type: 'path',
+        source_value: 'a2/**',
+        target_doc_id: 'doc-a',
+        edge_type: 'path_requires',
+        priority: 100,
+        specificity: 0,
+      });
+      expect(repo.getStalenessBaseline('doc-a')).toBeNull();
+      expect(repo.getStalenessBaseline('doc-b')).toBe('{"b/y.ts":"h"}');
+    });
+
+    it('retarget_edge drops the baselines of both the old and the new target', () => {
+      bootstrapTwoDocs();
+      approve('p-rt-sb', 'retarget_edge', { edge_id: 'e-a', target_doc_id: 'doc-b' });
+      expect(repo.getStalenessBaseline('doc-a')).toBeNull();
+      expect(repo.getStalenessBaseline('doc-b')).toBeNull();
+    });
+
+    it('remove_edge drops the target document baseline', () => {
+      bootstrapTwoDocs();
+      approve('p-rm-sb', 'remove_edge', { edge_id: 'e-a' });
+      expect(repo.getStalenessBaseline('doc-a')).toBeNull();
+      expect(repo.getStalenessBaseline('doc-b')).toBe('{"b/y.ts":"h"}');
+    });
+
+    it('doc_depends_on edge changes keep baselines', () => {
+      bootstrapTwoDocs();
+      approve('p-dep-sb', 'add_edge', {
+        edge_id: 'e-dep',
+        source_type: 'doc',
+        source_value: 'doc-b',
+        target_doc_id: 'doc-a',
+        edge_type: 'doc_depends_on',
+        priority: 100,
+        specificity: 0,
+      });
+      expect(repo.getStalenessBaseline('doc-a')).toBe('{"a/x.ts":"h"}');
+    });
+  });
+
   describe('Adapter Meta', () => {
     it('returns undefined when no meta is set', () => {
       expect(repo.getAdapterMeta()).toBeUndefined();
