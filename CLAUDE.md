@@ -1,5 +1,10 @@
 # Aegis — DAG-based Deterministic Context Compiler
 
+## Repository Policy (personal fork)
+
+- This working copy is the owner's personal fork (`origin` = `git@github-personal:siosig/aegis.git`). It is maintained to optimize the owner's own environment, and changes accumulate on this fork.
+- **[MUST NOT] Do not create pull requests to the upstream repository (`fuwasegu/aegis`) or any other repository, and do not suggest creating one.** Push only to `origin`.
+
 ## Architecture
 
 Aegis is an MCP server that compiles deterministic context for AI coding agents.
