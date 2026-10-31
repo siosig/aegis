@@ -10,3 +10,4 @@ docs/会話履歴*
 /.specify/
 /.vscode/
 /specs/
+/.claude-plugin-local/

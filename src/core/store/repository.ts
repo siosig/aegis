@@ -1605,7 +1605,13 @@ export class Repository {
     })();
   }
 
-  rejectProposal(proposalId: string, reason: string): void {
+  /**
+   * Reject a pending proposal.
+   * By default the evidence observations are reset (analyzed_at = NULL) so they can be re-analyzed.
+   * Pass `reanalyzeEvidence: false` when re-analysis would only recreate the same proposal
+   * (e.g. a superseded or stale document_import update_doc rejected by `approve-pending`).
+   */
+  rejectProposal(proposalId: string, reason: string, options: { reanalyzeEvidence?: boolean } = {}): void {
     const proposal = this.getProposal(proposalId);
     if (!proposal) throw new Error(`Proposal ${proposalId} not found`);
     if (proposal.status !== 'pending') throw new Error(`Proposal ${proposalId} is not pending`);
@@ -1615,6 +1621,7 @@ export class Repository {
       .prepare('UPDATE proposals SET status = ?, review_comment = ?, resolved_at = ? WHERE proposal_id = ?')
       .run('rejected', reason, now, proposalId);
 
+    if (options.reanalyzeEvidence === false) return;
     // Reset analyzed_at on evidence observations so they can be re-analyzed
     const evidenceObs = this.getProposalEvidence(proposalId);
     this.resetObservationsAnalyzed(evidenceObs.map((o) => o.observation_id));

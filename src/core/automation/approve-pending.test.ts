@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -500,6 +500,127 @@ describe('AegisService.approvePending — INV-6', () => {
       await client.close();
       await server.close();
     }
+  });
+});
+
+describe('approvePendingProposals: update_doc selection', () => {
+  let fx: Fixture;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+    projectRoot = mkdtempSync(join(tmpdir(), 'aegis-approve-pending-upd-'));
+    seedBaseKnowledge(fx);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  function updatePayload(content: string, sourcePath?: string): Record<string, unknown> {
+    const payload: Record<string, unknown> = { doc_id: 'base-doc', content, content_hash: hash(content) };
+    if (sourcePath !== undefined) payload.source_path = sourcePath;
+    return payload;
+  }
+
+  /** Inserts an update_doc proposal whose evidence is an already-analyzed document_import observation. */
+  function insertUpdate(id: string, content: string, createdAt: string, sourcePath?: string): void {
+    const obsId = `obs-${id}`;
+    fx.repo.insertObservation({
+      observation_id: obsId,
+      event_type: 'document_import',
+      payload: '{}',
+      related_compile_id: null,
+      related_snapshot_id: null,
+    });
+    fx.db.prepare('UPDATE observations SET analyzed_at = ? WHERE observation_id = ?').run(createdAt, obsId);
+    insertPending(fx, id, 'update_doc', updatePayload(content, sourcePath), createdAt);
+    fx.repo.insertProposalEvidence(id, obsId);
+  }
+
+  function writeSource(rel: string, content: string): void {
+    mkdirSync(join(projectRoot, rel, '..'), { recursive: true });
+    writeFileSync(join(projectRoot, rel), content, 'utf-8');
+  }
+
+  function baseContent(): string | undefined {
+    return fx.repo.getDocumentById('base-doc')?.content;
+  }
+
+  it('approves only the newest update_doc per document and rejects older ones as superseded', () => {
+    insertUpdate('p-u1', 'v1', '2026-01-01T00:00:01.000Z');
+    insertUpdate('p-u2', 'v2', '2026-01-01T00:00:02.000Z');
+    insertUpdate('p-u3', 'v3', '2026-01-01T00:00:03.000Z');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved.map((i) => i.proposal_id)).toEqual(['p-u3']);
+    expect(result.rejected.map((i) => [i.proposal_id, i.reason])).toEqual([
+      ['p-u1', 'superseded'],
+      ['p-u2', 'superseded'],
+    ]);
+    expect(result.rejected[0].detail).toBe('superseded by p-u3');
+    expect(result.failed).toEqual([]);
+    expect(baseContent()).toBe('v3');
+    expect(statusOf(fx, 'p-u1')).toBe('rejected');
+    expect(fx.repo.getProposal('p-u1')?.review_comment).toContain('superseded by p-u3');
+    // Evidence stays analyzed so the next maintenance run does not recreate the proposal.
+    expect(fx.repo.getObservation('obs-p-u1')?.analyzed_at).not.toBeNull();
+  });
+
+  it('rejects the newest update_doc as stale_content when it differs from the anchored source file', () => {
+    writeSource('docs/base.md', 'current file');
+    insertUpdate('p-old', 'old v1', '2026-01-01T00:00:01.000Z', 'docs/base.md');
+    insertUpdate('p-new', 'old v2', '2026-01-01T00:00:02.000Z', 'docs/base.md');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved).toEqual([]);
+    expect(result.rejected.map((i) => [i.proposal_id, i.reason])).toEqual([
+      ['p-old', 'superseded'],
+      ['p-new', 'stale_content'],
+    ]);
+    expect(result.rejected[1].detail).toContain('docs/base.md');
+    expect(baseContent()).toBe('base content');
+    expect(fx.repo.listProposals('pending', 10).total).toBe(0);
+  });
+
+  it('approves the newest update_doc when it matches the anchored source file', () => {
+    writeSource('docs/base.md', 'current file');
+    insertUpdate('p-old', 'old v1', '2026-01-01T00:00:01.000Z', 'docs/base.md');
+    insertUpdate('p-new', 'current file', '2026-01-01T00:00:02.000Z', 'docs/base.md');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved.map((i) => i.proposal_id)).toEqual(['p-new']);
+    expect(result.rejected.map((i) => i.proposal_id)).toEqual(['p-old']);
+    expect(baseContent()).toBe('current file');
+  });
+
+  it('approves the newest update_doc when the anchored file does not exist (cannot verify)', () => {
+    insertUpdate('p-new', 'v1', '2026-01-01T00:00:01.000Z', 'docs/missing.md');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved.map((i) => i.proposal_id)).toEqual(['p-new']);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it('dry-run reports would_reject and leaves every proposal pending', () => {
+    writeSource('docs/base.md', 'current file');
+    insertUpdate('p-old', 'old v1', '2026-01-01T00:00:01.000Z', 'docs/base.md');
+    insertUpdate('p-new', 'old v2', '2026-01-01T00:00:02.000Z', 'docs/base.md');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: true, types: null }, projectRoot);
+
+    expect(result.would_approve).toEqual([]);
+    expect(result.would_reject.map((i) => [i.proposal_id, i.reason])).toEqual([
+      ['p-old', 'superseded'],
+      ['p-new', 'stale_content'],
+    ]);
+    expect(result.rejected).toEqual([]);
+    expect(pendingIds(fx)).toEqual(['p-new', 'p-old']);
   });
 });
 

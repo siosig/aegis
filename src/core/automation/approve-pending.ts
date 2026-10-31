@@ -4,8 +4,18 @@
  * Approves pending proposals one by one in a fixed type order, skipping bundled proposals
  * (those require `aegis_approve_proposal_bundle`). Each approval runs in its own transaction
  * via `Repository.approveProposal`; a failure does not roll back earlier successes.
+ *
+ * update_doc: per doc_id only the newest proposal is a candidate. Older ones are rejected as
+ * `superseded`. The newest one is rejected as `stale_content` when the document resolves to a
+ * whole-file source anchor whose current file content differs from the proposed content
+ * (approving it would roll the document back to an older version). Rejections keep the evidence
+ * observations analyzed so the next maintenance run does not recreate the same proposals.
  */
 
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { resolveSourcePath } from '../paths.js';
+import { primaryAssetPathForHashSync } from '../source-refs.js';
 import type { Repository } from '../store/repository.js';
 import type { CanonicalVersion, Proposal, ProposalType } from '../types.js';
 
@@ -61,6 +71,11 @@ export interface ApprovePendingSkipped extends ApprovePendingItem {
   detail: string;
 }
 
+export interface ApprovePendingRejected extends ApprovePendingItem {
+  reason: 'superseded' | 'stale_content';
+  detail: string;
+}
+
 export interface ApprovePendingFailed extends ApprovePendingItem {
   /** Error.message (Error.name when empty). The stack goes to stderr. */
   error: string;
@@ -76,6 +91,10 @@ export interface ApprovePendingResult {
   selected: number;
   approved: ApprovePendingApproved[]; // [] on dry run
   would_approve: ApprovePendingItem[]; // non-empty only on dry run, in processing order
+  /** update_doc proposals rejected as superseded / stale_content. [] on dry run. */
+  rejected: ApprovePendingRejected[];
+  /** Same classification as `rejected`, non-empty only on dry run (the DB is not modified). */
+  would_reject: ApprovePendingRejected[];
   skipped: ApprovePendingSkipped[];
   failed: ApprovePendingFailed[]; // [] on dry run
   /** knowledge_version after the run (the current value on dry run). */
@@ -157,7 +176,144 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message || err.name : String(err);
 }
 
-/** Skips bundled proposals and approves the rest in order via repo.approveProposal(id, undefined, projectRoot). */
+type Rejection = Pick<ApprovePendingRejected, 'reason' | 'detail'>;
+
+function sha256(text: string): string {
+  return createHash('sha256').update(text).digest('hex');
+}
+
+/**
+ * Hash of the current whole-file source of the document as it would be after approving `payload`
+ * (payload anchor fields override the stored document). null when there is no whole-file anchor,
+ * the path is invalid, or the file does not exist (the proposal cannot be verified, so it is not rejected).
+ */
+function currentSourceHash(
+  repo: Repository,
+  docId: string,
+  payload: Record<string, unknown>,
+  projectRoot: string,
+): { path: string; hash: string } | null {
+  const doc = repo.getDocumentById(docId);
+  const pick = (key: 'source_path' | 'source_refs_json'): string | null => {
+    const value = key in payload ? payload[key] : doc?.[key];
+    return typeof value === 'string' ? value : null;
+  };
+  const path = primaryAssetPathForHashSync({
+    source_path: pick('source_path'),
+    source_refs_json: pick('source_refs_json'),
+  });
+  if (path === null || path.trim() === '') return null;
+  try {
+    const absPath = resolveSourcePath(path.trim(), projectRoot);
+    if (!existsSync(absPath)) return null;
+    return { path: path.trim(), hash: sha256(readFileSync(absPath, 'utf-8')) };
+  } catch {
+    // Invalid anchor (outside the project, unreadable): leave the decision to the approval itself.
+    return null;
+  }
+}
+
+/** Rejection for the newest update_doc of a document, or null when it may be approved. */
+function staleContentRejection(repo: Repository, proposal: Proposal, projectRoot: string): Rejection | null {
+  const payload = parsePayload(proposal.payload);
+  const docId = payload === null ? null : asString(payload.doc_id);
+  const content = payload === null ? null : asString(payload.content);
+  if (payload === null || docId === null || content === null) return null;
+  const source = currentSourceHash(repo, docId, payload, projectRoot);
+  if (source === null) return null;
+  const proposed = sha256(content);
+  if (proposed === source.hash) return null;
+  return {
+    reason: 'stale_content',
+    detail: `content does not match ${source.path} (proposal ${proposed.slice(0, 12)}, file ${source.hash.slice(0, 12)})`,
+  };
+}
+
+/**
+ * Classifies non-bundled update_doc proposals (in processing order): per doc_id, all but the
+ * newest are `superseded`; the newest is `stale_content` when it differs from the current source file.
+ */
+function classifyUpdateDocs(repo: Repository, ordered: Proposal[], projectRoot: string): Map<string, Rejection> {
+  const newestByDoc = new Map<string, Proposal>();
+  for (const p of ordered) {
+    if (p.proposal_type !== 'update_doc' || p.bundle_id != null) continue;
+    const docId = extractDocId(p.proposal_type, parsePayload(p.payload));
+    if (docId !== null) newestByDoc.set(docId, p); // later in order = newer
+  }
+  const rejections = new Map<string, Rejection>();
+  for (const p of ordered) {
+    if (p.proposal_type !== 'update_doc' || p.bundle_id != null) continue;
+    const docId = extractDocId(p.proposal_type, parsePayload(p.payload));
+    const newest = docId === null ? undefined : newestByDoc.get(docId);
+    if (newest === undefined) continue;
+    if (newest.proposal_id !== p.proposal_id) {
+      rejections.set(p.proposal_id, { reason: 'superseded', detail: `superseded by ${newest.proposal_id}` });
+      continue;
+    }
+    const stale = staleContentRejection(repo, p, projectRoot);
+    if (stale !== null) rejections.set(p.proposal_id, stale);
+  }
+  return rejections;
+}
+
+function noLongerPending(repo: Repository, item: ApprovePendingItem): ApprovePendingSkipped | null {
+  const fresh = repo.getProposal(item.proposal_id);
+  if (fresh !== undefined && fresh.status === 'pending') return null;
+  return {
+    ...item,
+    reason: 'no_longer_pending',
+    detail: fresh === undefined ? 'proposal no longer exists' : `status: ${fresh.status}`,
+  };
+}
+
+interface Buckets {
+  approved: ApprovePendingApproved[];
+  would_approve: ApprovePendingItem[];
+  rejected: ApprovePendingRejected[];
+  would_reject: ApprovePendingRejected[];
+  skipped: ApprovePendingSkipped[];
+  failed: ApprovePendingFailed[];
+}
+
+/** Applies one decision (approve or reject) to a still-pending proposal and records the outcome. */
+function applyDecision(
+  repo: Repository,
+  item: ApprovePendingItem,
+  rejection: Rejection | undefined,
+  projectRoot: string,
+  out: Buckets,
+): void {
+  const gone = noLongerPending(repo, item);
+  if (gone !== null) {
+    out.skipped.push(gone);
+    return;
+  }
+  try {
+    if (rejection !== undefined) {
+      repo.rejectProposal(item.proposal_id, `approve-pending: ${rejection.reason}: ${rejection.detail}`, {
+        reanalyzeEvidence: false,
+      });
+      out.rejected.push({ ...item, ...rejection });
+      return;
+    }
+    const version: CanonicalVersion = repo.approveProposal(item.proposal_id, undefined, projectRoot);
+    out.approved.push({ ...item, knowledge_version: version.knowledge_version, snapshot_id: version.snapshot_id });
+  } catch (err) {
+    // Another process may have resolved it between the status check and the write.
+    const raced = noLongerPending(repo, item);
+    if (raced !== null) {
+      out.skipped.push(raced);
+      return;
+    }
+    console.error(`[aegis] approve-pending: ${item.proposal_id} failed:`, err);
+    out.failed.push({ ...item, error: errorMessage(err) });
+  }
+}
+
+/**
+ * Skips bundled proposals, rejects superseded / stale update_doc proposals, and approves the rest
+ * in order via repo.approveProposal(id, undefined, projectRoot).
+ */
 export function approvePendingProposals(
   repo: Repository,
   options: ApprovePendingOptions,
@@ -171,56 +327,26 @@ export function approvePendingProposals(
     .map((p, i) => ({ p, i }))
     .sort((a, b) => typeIndex(a.p.proposal_type) - typeIndex(b.p.proposal_type) || a.i - b.i)
     .map(({ p }) => p);
+  const rejections = classifyUpdateDocs(repo, proposals, projectRoot);
 
-  const approved: ApprovePendingApproved[] = [];
-  const would_approve: ApprovePendingItem[] = [];
-  const skipped: ApprovePendingSkipped[] = [];
-  const failed: ApprovePendingFailed[] = [];
-
+  const out: Buckets = { approved: [], would_approve: [], rejected: [], would_reject: [], skipped: [], failed: [] };
   for (const proposal of proposals) {
     const item = buildItem(repo, proposal);
-
     if (proposal.bundle_id != null) {
-      skipped.push({
+      out.skipped.push({
         ...item,
         reason: 'bundled',
         detail: `bundle ${proposal.bundle_id}: use aegis_approve_proposal_bundle`,
       });
       continue;
     }
-
+    const rejection = rejections.get(proposal.proposal_id);
     if (options.dryRun) {
-      would_approve.push(item);
+      if (rejection !== undefined) out.would_reject.push({ ...item, ...rejection });
+      else out.would_approve.push(item);
       continue;
     }
-
-    const fresh = repo.getProposal(proposal.proposal_id);
-    if (fresh === undefined || fresh.status !== 'pending') {
-      skipped.push({
-        ...item,
-        reason: 'no_longer_pending',
-        detail: fresh === undefined ? 'proposal no longer exists' : `status: ${fresh.status}`,
-      });
-      continue;
-    }
-
-    try {
-      const version: CanonicalVersion = repo.approveProposal(proposal.proposal_id, undefined, projectRoot);
-      approved.push({ ...item, knowledge_version: version.knowledge_version, snapshot_id: version.snapshot_id });
-    } catch (err) {
-      // Another process may have approved it between the status check and the transaction.
-      const after = repo.getProposal(proposal.proposal_id);
-      if (after === undefined || after.status !== 'pending') {
-        skipped.push({
-          ...item,
-          reason: 'no_longer_pending',
-          detail: after === undefined ? 'proposal no longer exists' : `status: ${after.status}`,
-        });
-        continue;
-      }
-      console.error(`[aegis] approve-pending: ${proposal.proposal_id} failed:`, err);
-      failed.push({ ...item, error: errorMessage(err) });
-    }
+    applyDecision(repo, item, rejection, projectRoot, out);
   }
 
   return {
@@ -228,10 +354,12 @@ export function approvePendingProposals(
     types: options.types,
     pending_total,
     selected: proposals.length,
-    approved,
-    would_approve,
-    skipped,
-    failed,
+    approved: out.approved,
+    would_approve: out.would_approve,
+    rejected: out.rejected,
+    would_reject: out.would_reject,
+    skipped: out.skipped,
+    failed: out.failed,
     knowledge_version: repo.getKnowledgeMeta().current_version,
   };
 }

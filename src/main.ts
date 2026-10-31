@@ -585,7 +585,7 @@ async function handleApprovePending(): Promise<void> {
     const result = service.approvePending({ dryRun: cli.dryRun, types: cli.types }, 'admin');
     console.log(JSON.stringify(result, null, 2));
     console.error(
-      `[aegis] approve-pending: approved=${result.approved.length} failed=${result.failed.length} skipped=${result.skipped.length} (dry_run=${result.dry_run})`,
+      `[aegis] approve-pending: approved=${result.approved.length} failed=${result.failed.length} rejected=${result.rejected.length + result.would_reject.length} skipped=${result.skipped.length} (dry_run=${result.dry_run})`,
     );
     failedCount = result.failed.length;
   } catch (err) {

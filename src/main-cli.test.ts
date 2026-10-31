@@ -875,7 +875,7 @@ describe('CLI — approve-pending (dist/main.js)', () => {
     expect(result.approved).toEqual([]);
     expect(result.dry_run).toBe(false);
     const lines = r.stderr.trim().split('\n');
-    expect(lines[lines.length - 1]).toBe('[aegis] approve-pending: approved=0 failed=0 skipped=0 (dry_run=false)');
+    expect(lines[lines.length - 1]).toBe('[aegis] approve-pending: approved=0 failed=0 rejected=0 skipped=0 (dry_run=false)');
   }, 15_000);
 
   it('--dry-run lists a pending new_doc in would_approve and leaves it pending', async () => {
