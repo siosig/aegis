@@ -207,6 +207,21 @@ approveProposal():
 
 Rollback is not possible. The version never decreases.
 
+### Snapshot Pruning
+
+To keep the database from growing without bound, `createSnapshot()` prunes old Snapshots at the end of each call. A Snapshot is **retained** if it is any of:
+
+- one of the most recent N generations (highest `knowledge_version`; default N = 20, configurable via the `AEGIS_SNAPSHOT_RETENTION` environment variable or the `Repository` constructor — an invalid value logs one warning to stderr and falls back to the default), or
+- referenced from `compile_log.snapshot_id`, `observations.related_snapshot_id`, or `init_manifest.initial_snapshot_id`.
+
+For every other generation, the content rows (`snapshot_docs`, `snapshot_edges`, `snapshot_layer_rules`) are pruned, while the header row in `snapshots` is kept. A pruning failure never fails the approval; it is logged to stderr and retried on the next run.
+
+### Operational Notes
+
+- **`approve-pending`**: `aegis approve-pending` approves all pending proposals in one run. It is a CLI (admin) command only and is not exposed over MCP (INV-6). Proposals are approved one by one in the fixed type order `APPROVE_PENDING_TYPE_ORDER` (`bootstrap`, `new_doc`, `update_doc`, `add_edge`, `retarget_edge`, `remove_edge`, `deprecate`, `materialize`). `--types <t1,t2,...>` limits the proposal types, and `--dry-run` lists what would be approved without changing the DB. Proposals that belong to a bundle (`bundle_id`) are skipped with `reason: bundled`; approve those with `aegis_approve_proposal_bundle`. A proposal that is no longer pending (before its approval, or when re-fetched after its approval transaction failed, for example because another process approved it first) is also skipped, with `reason: no_longer_pending`, and is not counted as a failure. The exit code is 1 when any approval failed; it is set through `process.exitCode` so that the JSON on stdout is not truncated.
+- **Staleness scan**: `maintenance` lists the files to check with `git ls-files --cached --others --exclude-standard` (tracked and untracked files that are not git-ignored). When the project is not inside a git work tree, `git` is unavailable, or the project root itself is ignored by an outer repository's rules (`git check-ignore -q -- .` exits 0), it falls back to the previous directory walk. If `git ls-files` itself fails inside a work tree, `maintenance` fails instead of falling back.
+- **Runtime**: Node.js 26 or later.
+
 ### Content Hash
 
 Document `content_hash` is SHA-256. Same content → same hash → change detection is possible.
@@ -389,6 +404,7 @@ The six invariants Aegis maintains:
 ### INV-3: Snapshot Immutability
 - Once created, Snapshot contents cannot be modified
 - `snapshot_docs`, `snapshot_edges`, `snapshot_layer_rules` are INSERT-only
+- Content rows of generations outside the retention set (see [Snapshot Pruning](#snapshot-pruning)) may be pruned; the header row in `snapshots` is kept. Rows that remain are never modified
 
 ### INV-4: Monotonically Increasing Version
 - `knowledge_meta.current_version` always increments by +1

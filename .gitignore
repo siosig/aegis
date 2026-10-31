@@ -6,3 +6,7 @@ dist/
 .aegis/
 .tmp-test/
 docs/会話履歴*
+/.claude/
+/.specify/
+/.vscode/
+/specs/

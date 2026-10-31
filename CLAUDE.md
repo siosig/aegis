@@ -9,10 +9,10 @@ of edges to resolve exactly which documents an agent needs for a given set of ta
 ## Running
 
 ```bash
-npm run build          # compile TypeScript
-npm run start:agent    # start agent surface (default: ./aegis.db)
-npm run start:admin    # start admin surface
-npm test               # run all tests
+pnpm run build          # compile TypeScript
+pnpm run start:agent    # start agent surface (default: ./aegis.db)
+pnpm run start:admin    # start admin surface
+pnpm test               # run all tests
 ```
 
 ## Agent Surface Tools (6 tools)

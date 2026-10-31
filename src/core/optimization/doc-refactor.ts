@@ -203,7 +203,7 @@ export function aggregateRefactorSignals(
     const compileId = obs.related_compile_id;
     if (!compileId) continue;
     const bases = baseIdsByCompile.get(compileId);
-    if (!bases || !bases.has(payload.target_doc_id)) continue;
+    if (!bases?.has(payload.target_doc_id)) continue;
 
     const patterns = payload.target_files.map((f) => derivePathPattern(f));
 

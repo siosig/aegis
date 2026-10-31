@@ -21,6 +21,8 @@ Aegis は、AIコーディングエージェントにアーキテクチャガイ
 
 ## インストール
 
+**動作要件:** Node.js 26 以上。
+
 Aegis は 2 つの MCP surface を使います — 両方が必要です:
 
 | Surface | 役割 | ツール数 |
@@ -405,7 +407,8 @@ HuggingFace URI を直接指定することも可能: `--model hf:user/repo:file
 | サブコマンド | 説明 |
 |------------|------|
 | `deploy-adapters` | IDE アダプタ設定（Cursor ルール、CLAUDE.md、AGENTS.md）と Agent Skills をデプロイ |
-| `maintenance` | オブザベーション処理、ドキュメント同期、アーカイブ、アップグレードチェックを実行 |
+| `maintenance` | オブザベーション処理、ドキュメント同期、アーカイブ、アップグレードチェックを実行し、最後に DB の圧縮（`db_compaction`）を行う |
+| `approve-pending` | 保留中のプロポーザルを種類ごとに一括承認（`--types <t1,t2,...>` で種類を絞り込み、`--dry-run` で承認対象の列挙のみ）。admin 専用の CLI で、MCP ツールとしては公開しない（INV-6） |
 | `stats` | ナレッジ集計、利用状況、ヘルス、プロジェクト共有ステータスの JSON 出力 |
 | `doctor` | ヘルスチェックの人間可読サマリー（問題があれば exit 1） |
 | `share-export` | 承認済み Canonical Knowledge を `aegis-share/` にエクスポート |
@@ -422,6 +425,8 @@ npx @fuwasegu/aegis deploy-adapters --project-root /path    # プロジェクト
 npx @fuwasegu/aegis deploy-adapters --db /path/to/aegis.db  # カスタム DB パスを指定
 npx @fuwasegu/aegis maintenance                             # オブザベーション処理、同期、アーカイブ
 npx @fuwasegu/aegis maintenance --dry-run                   # レポートのみ（書き込みなし）
+npx @fuwasegu/aegis approve-pending --dry-run               # 承認対象の列挙のみ（DB は変更しない）
+npx @fuwasegu/aegis approve-pending --types new_doc,add_edge  # 指定した種類だけを一括承認
 npx @fuwasegu/aegis stats                                   # JSON ヘルス・利用状況データ
 npx @fuwasegu/aegis doctor                                  # ヘルスチェックサマリー
 npx @fuwasegu/aegis share-export                            # aegis-share/ にエクスポート
@@ -433,6 +438,13 @@ npx @fuwasegu/aegis share-materialize                       # ソースを DB �
 npx @fuwasegu/aegis share-materialize --dry-run             # 変更プレビュー
 npx @fuwasegu/aegis --list-models                           # 利用可能な SLM モデル一覧
 ```
+
+#### 運用上の注意
+
+- **`approve-pending` の出力:** 標準出力に JSON を 1 つ（`approved`、`would_approve`、`skipped`、`failed`）、診断を標準エラーに出力します。バンドルに属する提案（`bundle_id`）は `reason: bundled` で skipped にするため、`aegis_approve_proposal_bundle` で承認してください。すでに pending でない提案（別プロセスが先に承認した場合など）も `reason: no_longer_pending` の skipped になり、失敗には数えません。終了コードは、完了で `0`、承認の失敗を含むと `1`（成功した承認は残り、標準出力の JSON は最後まで出力されます）、使い方の誤りまたは DB を開けない場合は `2` です。
+- **staleness の検査対象:** `git ls-files`（追跡ファイル + 未追跡かつ `.gitignore` 対象外のファイル）に基づきます。git が使えない場合（git 未導入、git の作業ツリーの外、またはプロジェクトのルート自体が上位リポジトリの設定で無視されている場合）は従来の再帰走査に切り替わります。
+- **スナップショットの保持世代:** 環境変数 `AEGIS_SNAPSHOT_RETENTION`（既定 `20`、正の整数）で、保持する直近の世代数を指定します。不正な値の場合は警告を出して既定値 `20` を使います。
+- **DB の圧縮:** `maintenance` の `db_compaction` は、DB の空き領域が 1 MiB 以上かつ 25% 以上のときに限り、`maintenance` の最後に `VACUUM` を実行します（`--dry-run` では判定のみで実行しません）。
 
 > **注意**: バージョン追跡はフルデプロイ（`--targets` なし）時のみ更新されます。部分デプロイではバージョン記録は更新されないため、「アダプタテンプレートが古い可能性があります」という通知は、フルデプロイを実行するまで残ります。
 
@@ -451,6 +463,8 @@ npx @fuwasegu/aegis --list-models                           # 利用可能な SL
 | `--project-root` | `cwd()` | プロジェクトルート（repo-relative source_path 解決とデフォルト DB パスの基準） |
 | `--ollama-url` | `http://localhost:11434` | Ollama API URL（`--ollama` 使用時） |
 
+> **js-yaml 5 の互換性:** `load()` は YAML 1.2 の Core スキーマが既定のため、利用者のテンプレートや project-share の YAML にある `yes`/`no`/`on`/`off` や先頭が 0 の数値の解釈が、YAML 1.1 の場合と異なる可能性があります。
+
 ---
 
 ## 開発
@@ -458,9 +472,9 @@ npx @fuwasegu/aegis --list-models                           # 利用可能な SL
 ### ビルド・テスト
 
 ```bash
-npm run build    # TypeScript コンパイル
-npm test         # 全テスト実行（406+）
-npm run test:watch
+pnpm run build   # TypeScript コンパイル
+pnpm test        # 全テスト実行（406+）
+pnpm run test:watch
 ```
 
 <details>
@@ -469,7 +483,7 @@ npm run test:watch
 ```bash
 git clone https://github.com/fuwasegu/aegis.git
 cd aegis
-npm install && npm run build
+pnpm install && pnpm run build
 ```
 
 </details>

@@ -247,7 +247,7 @@ describe('parseSharedSource', () => {
 
     it('reports invalid YAML in frontmatter', () => {
       mkdirSync(join(sourceDir, 'documents'), { recursive: true });
-      writeFileSync(join(sourceDir, 'documents', 'bad-yaml.md'), '---\n: invalid yaml {{{\ntitle: T\n---\nbody');
+      writeFileSync(join(sourceDir, 'documents', 'bad-yaml.md'), '---\ntitle: [unclosed\nx: 1\n---\nbody');
 
       const result = parseSharedSource(sourceDir);
       expect(result.documents).toHaveLength(0);

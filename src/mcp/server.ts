@@ -18,6 +18,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { BudgetExceededError } from '../core/types.js';
 import { type AegisService, ObserveValidationError, type Surface } from './services.js';
+import { toolErrorResult } from './tool-error.js';
 
 type TextContent = { type: 'text'; text: string };
 
@@ -491,8 +492,8 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
         try {
           const result = await service.importDoc(params, surface);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: any) {
-          return { content: [{ type: 'text', text: `Import failed: ${e.message}` }], isError: true };
+        } catch (e: unknown) {
+          return toolErrorResult('Import failed', e);
         }
       },
     );
@@ -519,8 +520,8 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
         try {
           const result = service.analyzeDoc(params, surface);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: any) {
-          return { content: [{ type: 'text', text: `Analyze failed: ${e.message}` }], isError: true };
+        } catch (e: unknown) {
+          return toolErrorResult('Analyze failed', e);
         }
       },
     );
@@ -544,8 +545,8 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
         try {
           const result = service.analyzeImportBatch(params, surface);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: any) {
-          return { content: [{ type: 'text', text: `Batch analyze failed: ${e.message}` }], isError: true };
+        } catch (e: unknown) {
+          return toolErrorResult('Batch analyze failed', e);
         }
       },
     );
@@ -570,8 +571,8 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
         try {
           const result = service.executeImportPlan(params, surface);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: any) {
-          return { content: [{ type: 'text', text: `execute_import_plan failed: ${e.message}` }], isError: true };
+        } catch (e: unknown) {
+          return toolErrorResult('execute_import_plan failed', e);
         }
       },
     );
@@ -628,8 +629,8 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
         try {
           const result = await service.processObservations(params.event_type, surface);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: any) {
-          return { content: [{ type: 'text', text: `Processing failed: ${e.message}` }], isError: true };
+        } catch (e: unknown) {
+          return toolErrorResult('Processing failed', e);
         }
       },
     );
@@ -649,8 +650,8 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
         try {
           const result = await service.syncDocs({ doc_ids: params.doc_ids }, surface);
           return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: any) {
-          return { content: [{ type: 'text', text: `Sync failed: ${e.message}` }], isError: true };
+        } catch (e: unknown) {
+          return toolErrorResult('Sync failed', e);
         }
       },
     );

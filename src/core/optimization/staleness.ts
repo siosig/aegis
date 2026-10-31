@@ -7,67 +7,20 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Dirent } from 'node:fs';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, relative, sep } from 'node:path';
+import { existsSync, readFileSync } from 'node:fs';
+import { sep } from 'node:path';
 import picomatch from 'picomatch';
 import { resolveSourcePath } from '../paths.js';
 import { parseSourceRefsJson, sourceRefCountFromDocument } from '../source-refs.js';
 import type { Document, Edge, StalenessDetectedPayload } from '../types.js';
+import { listRepoFiles, type RepoListingSource } from './repo-file-listing.js';
 
-export const SEMANTIC_STALENESS_ALGORITHM_VERSION = '015-10-2' as const;
+export { listRepoRelativeFiles } from './repo-file-listing.js';
 
-const SKIP_DIR_NAMES = new Set([
-  '.git',
-  'node_modules',
-  'dist',
-  'coverage',
-  '.turbo',
-  'target',
-  'out',
-  '.next',
-  'build',
-]);
+export const SEMANTIC_STALENESS_ALGORITHM_VERSION = '015-10-3' as const;
 
 function toPosix(p: string): string {
   return p.split(sep).join('/');
-}
-
-/** Deterministic recursive listing of repo-relative file paths (posix-style). */
-export function listRepoRelativeFiles(projectRoot: string): string[] {
-  const out: string[] = [];
-
-  function walk(absDir: string): void {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(absDir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => a.name.localeCompare(b.name));
-    for (const ent of entries) {
-      if (SKIP_DIR_NAMES.has(ent.name)) continue;
-      const abs = join(absDir, ent.name);
-      try {
-        if (ent.isDirectory()) {
-          walk(abs);
-        } else if (ent.isFile()) {
-          const rel = relative(projectRoot, abs);
-          out.push(toPosix(rel));
-        }
-      } catch {
-        /* unreadable entry */
-      }
-    }
-  }
-
-  try {
-    walk(projectRoot);
-  } catch {
-    return [];
-  }
-  out.sort((a, b) => a.localeCompare(b));
-  return out;
 }
 
 /**
@@ -185,14 +138,20 @@ function mergeSortedUniquePaths(a: string[], b: string[]): string[] {
   return [...new Set([...a, ...b])].sort((x, y) => x.localeCompare(y));
 }
 
-/** Paths under project matching path_requires edges that target docId (approved path edges only). */
-export function linkedPathsForDoc(docId: string, edges: Edge[], sortedRelFiles: string[]): string[] {
-  const matchers: Array<ReturnType<typeof picomatch>> = [];
+/** picomatch matchers for approved path_requires/path edges that target docId. */
+export function buildEdgeMatchers(docId: string, edges: Edge[]): Array<(posixPath: string) => boolean> {
+  const matchers: Array<(posixPath: string) => boolean> = [];
   for (const e of edges) {
     if (e.status !== 'approved') continue;
     if (e.target_doc_id !== docId || e.edge_type !== 'path_requires' || e.source_type !== 'path') continue;
     matchers.push(picomatch(e.source_value, { dot: true }));
   }
+  return matchers;
+}
+
+/** Paths under project matching path_requires edges that target docId (approved path edges only). */
+export function linkedPathsForDoc(docId: string, edges: Edge[], sortedRelFiles: string[]): string[] {
+  const matchers = buildEdgeMatchers(docId, edges);
   if (matchers.length === 0) return [];
   const matched = new Set<string>();
   for (const rel of sortedRelFiles) {
@@ -202,13 +161,32 @@ export function linkedPathsForDoc(docId: string, edges: Edge[], sortedRelFiles: 
   return [...matched].sort((a, b) => a.localeCompare(b));
 }
 
+/** Per-scan fingerprint cache (remembers null results too). */
+export class FingerprintMemo {
+  private readonly cache = new Map<string, string | null>();
+  private computed = 0;
+
+  get(relPosix: string, compute: () => string | null): string | null {
+    if (this.cache.has(relPosix)) return this.cache.get(relPosix) ?? null;
+    const value = compute();
+    this.computed += 1;
+    this.cache.set(relPosix, value);
+    return value;
+  }
+
+  get computeCount(): number {
+    return this.computed;
+  }
+}
+
 export function fingerprintEdgeLinkedArtifacts(
   projectRoot: string,
   linkedPathsSorted: string[],
+  memo?: FingerprintMemo,
 ): Record<string, string> {
   const rec: Record<string, string> = {};
   for (const p of linkedPathsSorted) {
-    const fp = fingerprintLinkedFile(projectRoot, p);
+    const fp = memo ? memo.get(p, () => fingerprintLinkedFile(projectRoot, p)) : fingerprintLinkedFile(projectRoot, p);
     if (fp !== null) rec[p] = fp;
   }
   const ordered: Record<string, string> = {};
@@ -265,16 +243,47 @@ export interface SemanticStalenessScanInput {
   persistLevel3Baselines: boolean;
 }
 
+export interface SemanticStalenessScanStats {
+  files_listed: number;
+  fingerprints_computed: number;
+  listing_source: RepoListingSource;
+}
+
 export interface SemanticStalenessScanResult {
   findings: StalenessDetectedPayload[];
   baselineUpserts: Array<{ doc_id: string; fingerprint_json: string }>;
+  stats: SemanticStalenessScanStats;
+}
+
+/**
+ * A baseline path that is absent from the current fingerprints but still exists on disk and still matches
+ * the edge globs was only dropped from the scan scope (e.g. now git-ignored), not removed.
+ */
+function movedOutOfScan(
+  k: string,
+  linkedSet: ReadonlySet<string>,
+  fileSet: ReadonlySet<string>,
+  matchers: Array<(posixPath: string) => boolean>,
+  projectRoot: string,
+): boolean {
+  if (linkedSet.has(k) || fileSet.has(k)) return false;
+  let exists: boolean;
+  try {
+    exists = existsSync(resolveSourcePath(k, projectRoot));
+  } catch {
+    return false;
+  }
+  return exists && matchers.some((m) => m(k));
 }
 
 export function collectSemanticStalenessFindings(input: SemanticStalenessScanInput): SemanticStalenessScanResult {
   const findings: StalenessDetectedPayload[] = [];
   const baselineUpserts: Array<{ doc_id: string; fingerprint_json: string }> = [];
 
-  const sortedFiles = listRepoRelativeFiles(input.projectRoot);
+  const listing = listRepoFiles(input.projectRoot);
+  const sortedFiles = listing.files;
+  const fileSet = new Set(sortedFiles);
+  const memo = new FingerprintMemo();
   const edgeTargets = new Set<string>();
   for (const e of input.edges) {
     if (e.status === 'approved' && e.edge_type === 'path_requires' && e.source_type === 'path') {
@@ -363,7 +372,9 @@ export function collectSemanticStalenessFindings(input: SemanticStalenessScanInp
       : linkedPathsForDoc(doc.doc_id, input.edges, sortedFiles);
 
     if (linked.length === 0) continue;
-    const currentMap = fingerprintEdgeLinkedArtifacts(input.projectRoot, linked);
+    const linkedSet = new Set(linked);
+    const matchers = buildEdgeMatchers(doc.doc_id, input.edges);
+    const currentMap = fingerprintEdgeLinkedArtifacts(input.projectRoot, linked, memo);
     const serialized = stableStringifyFingerprints(currentMap);
 
     const prev = input.getBaseline(doc.doc_id);
@@ -402,6 +413,7 @@ export function collectSemanticStalenessFindings(input: SemanticStalenessScanInp
           }),
         );
       } else if (a !== undefined && b === undefined) {
+        if (movedOutOfScan(k, linkedSet, fileSet, matchers, input.projectRoot)) continue;
         drift = true;
         findings.push(
           finding({
@@ -431,5 +443,13 @@ export function collectSemanticStalenessFindings(input: SemanticStalenessScanInp
     }
   }
 
-  return { findings, baselineUpserts };
+  return {
+    findings,
+    baselineUpserts,
+    stats: {
+      files_listed: sortedFiles.length,
+      fingerprints_computed: memo.computeCount,
+      listing_source: listing.source,
+    },
+  };
 }

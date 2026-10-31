@@ -64,8 +64,19 @@ export {
   splitMarkdownSections,
 } from './import-plan.js';
 export {
+  listGitVisibleFiles,
+  listRepoFiles,
+  type RepoFileListing,
+  RepoListingError,
+  type RepoListingSource,
+  SKIP_DIR_NAMES,
+  walkRepoFiles,
+} from './repo-file-listing.js';
+export {
+  buildEdgeMatchers,
   collectSemanticStalenessFindings,
   extractTsExportedSymbols,
+  FingerprintMemo,
   findRenameCandidatePath,
   fingerprintEdgeLinkedArtifacts,
   linkedPathsForDoc,
@@ -75,5 +86,6 @@ export {
   SEMANTIC_STALENESS_ALGORITHM_VERSION,
   type SemanticStalenessScanInput,
   type SemanticStalenessScanResult,
+  type SemanticStalenessScanStats,
   stableStringifyFingerprints,
 } from './staleness.js';

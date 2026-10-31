@@ -1,6 +1,6 @@
 /**
  * Smoke tests for `npx aegis stats` / `npx aegis doctor` (built dist/main.js).
- * `npm test` runs `build` first (see package.json), so dist exists.
+ * `pnpm test` runs `build` first (see package.json), so dist exists.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -751,4 +751,221 @@ describe('CLI — share-source-export (dist/main.js)', () => {
     expect(r.stderr).toContain('Database not found');
     rmSync(emptyDir, { recursive: true, force: true });
   }, 15_000);
+});
+
+// ---------------------------------------------------------------------------
+// 001-aegis-perf-upgrade (T011): `maintenance` scan summary line.
+// Requires `pnpm run build` beforehand (spawns dist/main.js). T018 / T025 append further cases here.
+// ---------------------------------------------------------------------------
+
+interface CliResult {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+function runCli(args: string[]): CliResult {
+  const r = spawnSync(execPath, [MAIN_JS, ...args], { cwd: process.cwd(), encoding: 'utf-8' });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+describe('CLI — maintenance scan summary (dist/main.js)', () => {
+  let root: string;
+
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), 'aegis-cli-maint-'));
+    const init = spawnSync('git', ['init', '--quiet'], { cwd: root, encoding: 'utf-8' });
+    expect(init.status, `git init stderr: ${init.stderr}`).toBe(0);
+    mkdirSync(join(root, '.aegis'), { recursive: true });
+    const db = await createDatabase(join(root, '.aegis', 'aegis.db'));
+    const repo = new Repository(db);
+    repo.bumpVersionAndSnapshot();
+    // Release file + advisory lock before spawning CLI.
+    db.close();
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('maintenance --dry-run prints a scan line right after the semantic staleness line', () => {
+    const r = runCli(['maintenance', '--dry-run', '--project-root', root]);
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    const lines = r.stdout.split('\n');
+    const idx = lines.findIndex((l) => l.includes('semantic staleness (015-10-3):'));
+    expect(idx, `stdout: ${r.stdout}`).toBeGreaterThanOrEqual(0);
+    expect(lines[idx + 1]).toMatch(/^ {3}scan: \d+ file\(s\) listed via (git|walk), \d+ fingerprint\(s\) computed$/);
+    expect(lines[idx + 1]).toContain('listed via git');
+  }, 30_000);
+
+  // T025 (US4): `6. db_compaction` section after `5. co_change_cache`.
+  it('maintenance --dry-run prints a 6. db_compaction section after 5. co_change_cache (vacuumed: false)', () => {
+    const r = runCli(['maintenance', '--dry-run', '--project-root', root]);
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    const out = r.stdout;
+    expect(out).toMatch(/^6\. db_compaction$/m);
+    expect(out).toMatch(/^ {3}pages: \d+, free: \d+ \(\d+ bytes, \d\.\d{3}\)$/m);
+    expect(out).toMatch(/^ {3}threshold_met: (true|false), vacuumed: (true|false)$/m);
+    const coChangeAt = out.search(/^5\. co_change_cache$/m);
+    const compactionAt = out.search(/^6\. db_compaction$/m);
+    expect(coChangeAt, `stdout: ${out}`).toBeGreaterThanOrEqual(0);
+    expect(compactionAt).toBeGreaterThan(coChangeAt);
+    // Exact shape: blank line, heading, then the two detail lines.
+    expect(out).toMatch(
+      /\n\n6\. db_compaction\n {3}pages: \d+, free: \d+ \(\d+ bytes, \d\.\d{3}\)\n {3}threshold_met: (true|false), vacuumed: false\n/,
+    );
+  }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// 001-aegis-perf-upgrade (T018): `approve-pending` subcommand.
+// Requires `pnpm run build` beforehand (spawns dist/main.js).
+// ---------------------------------------------------------------------------
+
+describe('CLI — approve-pending (dist/main.js)', () => {
+  let root: string;
+  let dbPath: string;
+
+  /** Opens the project DB, applies `fn`, and closes it so the CLI child process can open the file. */
+  async function withRepo(fn: (repo: Repository) => void): Promise<void> {
+    const db = await createDatabase(dbPath);
+    try {
+      fn(new Repository(db));
+    } finally {
+      db.close();
+    }
+  }
+
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), 'aegis-cli-approve-'));
+    mkdirSync(join(root, '.aegis'), { recursive: true });
+    dbPath = join(root, '.aegis', 'aegis.db');
+    await withRepo((repo) => {
+      repo.bumpVersionAndSnapshot();
+    });
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('exits 2 on usage errors: unknown --types value, unknown flag, missing --types value', () => {
+    const base = ['approve-pending', '--project-root', root];
+    expect(runCli([...base, '--types', 'foo']).status).toBe(2);
+    expect(runCli([...base, '--bogus']).status).toBe(2);
+    expect(runCli(['approve-pending', '--project-root', root, '--types']).status).toBe(2);
+    expect(runCli([...base, '--types', '--dry-run']).status).toBe(2);
+  }, 30_000);
+
+  it('exits 2 and reports "Database not found" when the DB file is missing', () => {
+    const emptyRoot = mkdtempSync(join(tmpdir(), 'aegis-cli-approve-nodb-'));
+    try {
+      const r = runCli(['approve-pending', '--project-root', emptyRoot]);
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain('[aegis] Database not found at');
+    } finally {
+      rmSync(emptyRoot, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('exits 0 with an empty "approved" list and a summary line when nothing is pending', () => {
+    const r = runCli(['approve-pending', '--project-root', root]);
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    const result = JSON.parse(r.stdout) as { approved: unknown[]; dry_run: boolean };
+    expect(result.approved).toEqual([]);
+    expect(result.dry_run).toBe(false);
+    const lines = r.stderr.trim().split('\n');
+    expect(lines[lines.length - 1]).toBe('[aegis] approve-pending: approved=0 failed=0 skipped=0 (dry_run=false)');
+  }, 15_000);
+
+  it('--dry-run lists a pending new_doc in would_approve and leaves it pending', async () => {
+    await withRepo((repo) => {
+      repo.insertProposal({
+        proposal_id: 'p-newdoc',
+        proposal_type: 'new_doc',
+        payload: JSON.stringify({
+          doc_id: 'guide',
+          title: 'Guide',
+          kind: 'guideline',
+          content: 'Body.',
+          content_hash: hash('Body.'),
+        }),
+        status: 'pending',
+        review_comment: null,
+      });
+    });
+
+    const r = runCli(['approve-pending', '--dry-run', '--project-root', root]);
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    const result = JSON.parse(r.stdout) as { dry_run: boolean; would_approve: { proposal_id: string }[] };
+    expect(result.dry_run).toBe(true);
+    expect(result.would_approve).toHaveLength(1);
+    expect(result.would_approve[0].proposal_id).toBe('p-newdoc');
+
+    await withRepo((repo) => {
+      expect(repo.getProposal('p-newdoc')?.status).toBe('pending');
+    });
+  }, 15_000);
+
+  it('exits 1 and reports "failed" when an add_edge targets a missing document', async () => {
+    await withRepo((repo) => {
+      repo.insertProposal({
+        proposal_id: 'p-badedge',
+        proposal_type: 'add_edge',
+        payload: JSON.stringify({
+          edge_id: 'e-bad',
+          source_type: 'path',
+          source_value: 'src/**',
+          target_doc_id: 'does-not-exist',
+          edge_type: 'path_requires',
+          priority: 1,
+          specificity: 0,
+        }),
+        status: 'pending',
+        review_comment: null,
+      });
+    });
+
+    const r = runCli(['approve-pending', '--project-root', root]);
+    expect(r.status, `stdout: ${r.stdout}\nstderr: ${r.stderr}`).toBe(1);
+    const result = JSON.parse(r.stdout) as { failed: { proposal_id: string }[] };
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].proposal_id).toBe('p-badedge');
+    expect(r.stderr).toContain('[aegis] approve-pending: p-badedge failed:');
+  }, 15_000);
+
+  it('keeps the full JSON on stdout (> 64 KiB) when exiting 1 with failures', async () => {
+    const count = 2000;
+    await withRepo((repo) => {
+      for (let i = 0; i < count; i++) {
+        repo.insertProposal({
+          proposal_id: `p-bad-${String(i).padStart(3, '0')}`,
+          proposal_type: 'add_edge',
+          payload: JSON.stringify({
+            edge_id: `e-bad-${i}`,
+            source_type: 'path',
+            source_value: `src/${'x'.repeat(40)}-${i}/**`,
+            target_doc_id: 'does-not-exist',
+            edge_type: 'path_requires',
+            priority: 1,
+            specificity: 0,
+          }),
+          status: 'pending',
+          review_comment: null,
+        });
+      }
+    });
+
+    // runCli's default maxBuffer (1 MiB) is too small for stdout + one stack trace per failure on stderr.
+    const spawned = spawnSync(execPath, [MAIN_JS, 'approve-pending', '--project-root', root], {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+      maxBuffer: 256 * 1024 * 1024,
+    });
+    const r = { status: spawned.status, stdout: spawned.stdout ?? '', stderr: spawned.stderr ?? '' };
+    expect(r.status, `stderr: ${r.stderr.slice(-500)}`).toBe(1);
+    expect(r.stdout.length).toBeGreaterThan(65_536);
+    const result = JSON.parse(r.stdout) as { failed: unknown[] };
+    expect(result.failed).toHaveLength(count);
+  }, 120_000);
 });

@@ -21,6 +21,8 @@ The database is stored at `.aegis/aegis.db` in the project root. The `.aegis/` d
 
 ## Installation
 
+**Requirements**: Node.js 26 or later.
+
 Aegis uses two MCP surfaces — both are required:
 
 | Surface | Role | Tools |
@@ -406,6 +408,7 @@ You can also pass a HuggingFace URI directly: `--model hf:user/repo:file.gguf`
 |------------|-------------|
 | `deploy-adapters` | Deploy IDE adapter configurations (Cursor rules, CLAUDE.md, AGENTS.md) and Agent Skills |
 | `maintenance` | Run observation processing, doc sync, archive, and upgrade check |
+| `approve-pending` | Approve all pending proposals in one run (`--types <t1,t2,...>` limits proposal types, `--dry-run` lists what would be approved without changing the DB). Admin-only: not exposed over MCP (INV-6) |
 | `stats` | JSON output of knowledge counts, usage, health, and project share status |
 | `doctor` | Human-readable health check (exits 1 if issues found) |
 | `share-export` | Export approved Canonical Knowledge to `aegis-share/` |
@@ -422,6 +425,8 @@ npx @fuwasegu/aegis deploy-adapters --project-root /path    # Specify project ro
 npx @fuwasegu/aegis deploy-adapters --db /path/to/aegis.db  # Use custom DB path
 npx @fuwasegu/aegis maintenance                             # Process observations, sync, archive
 npx @fuwasegu/aegis maintenance --dry-run                   # Report only (no writes)
+npx @fuwasegu/aegis approve-pending --dry-run               # List pending proposals that would be approved
+npx @fuwasegu/aegis approve-pending --types new_doc,add_edge  # Approve only these proposal types
 npx @fuwasegu/aegis stats                                   # JSON health and usage data
 npx @fuwasegu/aegis doctor                                  # Health check summary
 npx @fuwasegu/aegis share-export                            # Export to aegis-share/
@@ -433,6 +438,15 @@ npx @fuwasegu/aegis share-materialize                       # Apply source to DB
 npx @fuwasegu/aegis share-materialize --dry-run             # Preview changes
 npx @fuwasegu/aegis --list-models                           # List available SLM models
 ```
+
+`approve-pending` prints one JSON document (`approved`, `would_approve`, `skipped`, `failed`) to stdout and diagnostics to stderr. Proposals that belong to a bundle (`bundle_id`) are skipped (`reason: bundled`); approve those with `aegis_approve_proposal_bundle`. Proposals that are no longer pending (for example, approved by another process first) are also skipped (`reason: no_longer_pending`) and do not count as failures. Exit codes: `0` on completion, `1` if any approval failed (approvals that succeeded stay applied; the JSON on stdout is still written in full), `2` on a usage error or when the database cannot be opened.
+
+#### Maintenance details
+
+- **Staleness scan**: `maintenance` lists the files to check with `git ls-files --cached --others --exclude-standard` (tracked and untracked files that are not git-ignored; symlinks, submodules, deleted files and directories such as `node_modules` and `dist` are excluded). When the project is not inside a git work tree, `git` is unavailable, or the project root itself is ignored by an outer repository's rules, it falls back to the previous directory walk. If `git ls-files` itself fails inside a work tree, `maintenance` fails instead of falling back. The summary reports the source as `scan: <n> file(s) listed via git|walk, <n> fingerprint(s) computed`.
+- **Snapshot retention**: each approval prunes the document, edge and layer-rule rows of old snapshots, keeping the newest 20 generations (plus any snapshot still referenced by a compile log, an observation, or the initial baseline). Set `AEGIS_SNAPSHOT_RETENTION` to a positive integer to change the count; an invalid value logs a warning and the default of 20 is used.
+- **DB compaction**: `maintenance` ends with a `db_compaction` section. It runs `VACUUM` only when the free space in the database file is at least 1 MiB and at least 25% of the file. With `--dry-run` it reports whether the threshold is met but never vacuums.
+- **YAML compatibility**: Aegis parses YAML with js-yaml 5, whose `load()` defaults to the YAML 1.2 Core schema. In your custom templates and project-share YAML, values such as `yes`/`no`/`on`/`off` and numbers with a leading zero may be interpreted differently than under YAML 1.1.
 
 > **Note**: Version tracking is only updated on full deployments (without `--targets`). Partial deployments will not update the version record, so the "adapter templates may be outdated" notice will persist until a full deployment is run.
 
@@ -458,9 +472,9 @@ npx @fuwasegu/aegis --list-models                           # List available SLM
 ### Building
 
 ```bash
-npm run build    # Compile TypeScript
-npm test         # Run all tests (406+)
-npm run test:watch
+pnpm run build   # Compile TypeScript
+pnpm test        # Run all tests (406+)
+pnpm run test:watch
 ```
 
 <details>
@@ -469,7 +483,7 @@ npm run test:watch
 ```bash
 git clone https://github.com/fuwasegu/aegis.git
 cd aegis
-npm install && npm run build
+pnpm install && pnpm run build
 ```
 
 </details>

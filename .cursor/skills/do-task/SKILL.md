@@ -108,7 +108,7 @@ bash .cursor/skills/do-task/scripts/codex-critical-review.sh docs/tasks/014-01-e
 biome を使ってフォーマットチェックする．
 
 ```bash
-npm run lint:fix
+pnpm run lint:fix
 ```
 
 自動で修正できないエラーは，手動で修正する．

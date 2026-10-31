@@ -15,35 +15,37 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
         with:
-          node-version: 22
-          cache: npm
+          node-version: 26
+          cache: pnpm
           registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
         timeout-minutes: 5
 
       - name: Build
-        run: npm run build
+        run: pnpm run build
 
       - name: Test
-        run: npm test
+        run: pnpm test
 
       - name: Sync version from tag
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          npm version "$TAG" --no-git-tag-version --allow-same-version
+          pnpm version "$TAG" --no-git-tag-version --allow-same-version
 
       - name: Publish
         run: |
           if [ "${{ github.event.repository.visibility }}" = "public" ]; then
-            npm publish --provenance --access public
+            pnpm publish --provenance --access public --no-git-checks
           else
-            npm publish --access public
+            pnpm publish --access public --no-git-checks
           fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -18,6 +18,9 @@
  *   npx aegis deploy-adapters --db path/to/aegis.db  # Use custom DB path
  *   npx aegis maintenance                        # process_observations → sync_docs → archive → check_upgrade
  *   npx aegis maintenance --dry-run                # Report only (no writes)
+ *   npx aegis approve-pending                    # Approve all pending proposals (admin CLI only; not an MCP tool)
+ *   npx aegis approve-pending --dry-run          # List what would be approved (no writes)
+ *   npx aegis approve-pending --types new_doc,add_edge
  *   npx aegis stats                              # JSON: knowledge / usage / health (read-only; no DB writes)
  *   npx aegis doctor                             # Health summary; read-only; exits 1 if issues
  *   npx aegis share-export                       # Export approved Canonical to aegis-share/
@@ -45,10 +48,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** Directory of this module (`import.meta.dirname` is Node 20.11+; CI tests Node 18). */
+/** Directory of this module (kept as `fileURLToPath(import.meta.url)`; Node 26+ is the supported baseline). */
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { parseProposalTypesOption } from './core/automation/approve-pending.js';
 import { shareHydrate } from './core/project-share/hydrate.js';
 import {
   shareExport,
@@ -61,6 +65,7 @@ import { createDatabase } from './core/store/database.js';
 import { runInitialBaselineSourcePathMigration } from './core/store/migrations/index.js';
 import { Repository } from './core/store/repository.js';
 import type { IntentTagger } from './core/tagging/tagger.js';
+import type { ProposalType } from './core/types.js';
 import { OllamaIntentTagger } from './expansion/intent-tagger.js';
 import { LlamaEngine } from './expansion/llama-engine.js';
 import { LlamaIntentTagger } from './expansion/llama-intent-tagger.js';
@@ -381,6 +386,9 @@ function printMaintenanceSummary(result: MaintenanceRunResult): void {
     console.log(
       `\n   semantic staleness (${st.semantic.algorithm_version}): ${st.semantic.findings.length} finding(s), ${st.semantic.baseline_writes} baseline write(s)`,
     );
+    console.log(
+      `   scan: ${st.semantic.scan_stats.files_listed} file(s) listed via ${st.semantic.scan_stats.listing_source}, ${st.semantic.scan_stats.fingerprints_computed} fingerprint(s) computed`,
+    );
     if (st.semantic.findings.length > 0) {
       for (const f of st.semantic.findings) {
         console.log(`     [L${String(f.level)}/${f.kind}] ${f.doc_id}: ${f.detail}`);
@@ -419,6 +427,13 @@ function printMaintenanceSummary(result: MaintenanceRunResult): void {
       console.log(`   note: ${cc.skipped_reason}`);
     }
   }
+
+  console.log('\n6. db_compaction');
+  const dc = result.db_compaction;
+  console.log(
+    `   pages: ${dc.page_count}, free: ${dc.freelist_count} (${dc.free_bytes} bytes, ${dc.free_ratio.toFixed(3)})`,
+  );
+  console.log(`   threshold_met: ${dc.threshold_met}, vacuumed: ${dc.vacuumed}`);
 
   console.log('');
 }
@@ -478,6 +493,108 @@ async function handleMaintenance(): Promise<void> {
   printMaintenanceSummary(result);
   if (!dryRun && result.process_observations.errors?.length) {
     process.exit(1);
+  }
+}
+
+export interface ApprovePendingCli {
+  projectRoot: string;
+  dbPath: string;
+  templatesRoot: string;
+  extraTemplateDirs: string[];
+  types: ProposalType[] | null;
+  dryRun: boolean;
+}
+
+/** Parses `approve-pending` arguments strictly: unknown flags and missing values throw. */
+export function parseApprovePendingCli(args: string[]): ApprovePendingCli {
+  let projectRoot = resolve(process.cwd());
+  let customDbPath: string | undefined;
+  let templatesRoot = join(SCRIPT_DIR, '../templates');
+  const extraTemplateDirs: string[] = [];
+  let types: ProposalType[] | null = null;
+  let dryRun = false;
+
+  const takeValue = (flag: string, index: number): string => {
+    const value = args[index + 1];
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`${flag} requires a value`);
+    }
+    return value;
+  };
+
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i];
+    switch (flag) {
+      case '--dry-run':
+        dryRun = true;
+        break;
+      case '--types':
+        types = parseProposalTypesOption(takeValue(flag, i));
+        i++;
+        break;
+      case '--project-root':
+        projectRoot = resolve(takeValue(flag, i));
+        i++;
+        break;
+      case '--db':
+        customDbPath = takeValue(flag, i);
+        i++;
+        break;
+      case '--templates':
+        templatesRoot = takeValue(flag, i);
+        i++;
+        break;
+      case '--template-dir':
+        extraTemplateDirs.push(takeValue(flag, i));
+        i++;
+        break;
+      default:
+        throw new Error(`Unknown option: ${flag}`);
+    }
+  }
+
+  return {
+    projectRoot,
+    dbPath: customDbPath ?? join(projectRoot, DEFAULT_DB_PATH),
+    templatesRoot,
+    extraTemplateDirs,
+    types,
+    dryRun,
+  };
+}
+
+async function handleApprovePending(): Promise<void> {
+  let cli: ApprovePendingCli;
+  try {
+    cli = parseApprovePendingCli(process.argv.slice(3));
+  } catch (err) {
+    console.error(`[aegis] approve-pending: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(2);
+  }
+
+  if (!existsSync(cli.dbPath)) {
+    console.error(`[aegis] Database not found at ${cli.dbPath}`);
+    process.exit(2);
+  }
+
+  let failedCount = 0;
+  try {
+    const db = await createDatabase(cli.dbPath);
+    const repo = new Repository(db);
+    const service = new AegisService(repo, cli.templatesRoot, null, cli.extraTemplateDirs, false, cli.projectRoot);
+    const result = service.approvePending({ dryRun: cli.dryRun, types: cli.types }, 'admin');
+    console.log(JSON.stringify(result, null, 2));
+    console.error(
+      `[aegis] approve-pending: approved=${result.approved.length} failed=${result.failed.length} skipped=${result.skipped.length} (dry_run=${result.dry_run})`,
+    );
+    failedCount = result.failed.length;
+  } catch (err) {
+    console.error(`[aegis] approve-pending: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
+    process.exit(2);
+  }
+  if (failedCount > 0) {
+    // Do not call process.exit(): it can truncate piped stdout (64 KiB) before the JSON is flushed.
+    process.exitCode = 1;
   }
 }
 
@@ -875,6 +992,11 @@ async function main() {
 
   if (subcommand === 'maintenance') {
     await handleMaintenance();
+    return;
+  }
+
+  if (subcommand === 'approve-pending') {
+    await handleApprovePending();
     return;
   }
 

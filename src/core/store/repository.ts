@@ -37,6 +37,12 @@ import {
 } from '../types.js';
 import type { AegisDatabase } from './database.js';
 import { orderPendingBundleProposals } from './proposal-bundle-order.js';
+import {
+  compactIfNeeded,
+  type DbCompactionReport,
+  pruneSnapshots,
+  resolveSnapshotRetention,
+} from './snapshot-pruning.js';
 
 const DOC_OWNERSHIP_SET = new Set<DocOwnership>(['file-anchored', 'standalone', 'derived']);
 
@@ -79,7 +85,10 @@ export class AlreadyInitializedError extends Error {
 }
 
 export class Repository {
-  constructor(private db: AegisDatabase) {}
+  constructor(
+    private db: AegisDatabase,
+    private readonly snapshotRetention: number = resolveSnapshotRetention(),
+  ) {}
 
   runInTransaction(fn: () => void): void {
     this.db.transaction(fn)();
@@ -868,6 +877,22 @@ export class Repository {
     return { proposals, total };
   }
 
+  /**
+   * Pending proposals (optionally narrowed to the given proposal types), ordered by
+   * created_at ASC then proposal_id ASC. `types = []` returns [] without querying.
+   */
+  listPendingProposalsOrdered(types: ProposalType[] | null): Proposal[] {
+    let sql = "SELECT * FROM proposals WHERE status = 'pending'";
+    const params: string[] = [];
+    if (types !== null) {
+      if (types.length === 0) return [];
+      sql += ` AND proposal_type IN (${types.map(() => '?').join(', ')})`;
+      params.push(...types);
+    }
+    sql += ' ORDER BY created_at ASC, proposal_id ASC';
+    return this.db.prepare(sql).all(...params) as Proposal[];
+  }
+
   getProposalEvidence(proposalId: string): Observation[] {
     return this.db
       .prepare(`
@@ -993,7 +1018,18 @@ export class Repository {
       insertRule.run(snapshotId, rule.rule_id, rule.path_pattern, rule.layer_name, rule.priority, rule.specificity);
     }
 
+    try {
+      pruneSnapshots(this.db, this.snapshotRetention);
+    } catch (err) {
+      console.error('[aegis] snapshot pruning failed:', err);
+    }
+
     return { snapshot_id: snapshotId, knowledge_version: version, created_at: new Date().toISOString() };
+  }
+
+  /** Thin delegation to snapshot-pruning.compactIfNeeded (call outside a transaction). */
+  compactDatabaseIfNeeded(dryRun: boolean): DbCompactionReport {
+    return compactIfNeeded(this.db, { dryRun });
   }
 
   getCurrentSnapshot(): Snapshot | undefined {
@@ -1533,7 +1569,7 @@ export class Repository {
 
       for (const p of ordered) {
         const fresh = this.getProposal(p.proposal_id);
-        if (!fresh || fresh.status !== 'pending') {
+        if (fresh?.status !== 'pending') {
           throw new Error(`Proposal ${p.proposal_id} is no longer pending (concurrent modification?)`);
         }
         if (fresh.bundle_id !== bundleId) {
@@ -2086,7 +2122,7 @@ export class Repository {
     }
     if (replacedBy !== undefined) {
       const repl = this.getDocumentById(replacedBy);
-      if (!repl || repl.status !== 'approved') {
+      if (repl?.status !== 'approved') {
         throw new Error(`replaced_by_doc_id '${replacedBy}' must reference an approved document`);
       }
     }

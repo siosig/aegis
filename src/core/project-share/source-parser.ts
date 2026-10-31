@@ -11,7 +11,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import type { DocOwnership, DocumentKind } from '../types.js';
 import type {
   SharedSourceParseResult,
@@ -123,7 +123,7 @@ export function parseSharedSource(sourceDir: string): SharedSourceParseResult {
   const errors: SourceParseError[] = [];
 
   const rootStat = safeStat(sourceDir, '.', errors);
-  if (!rootStat || !rootStat.isDirectory) {
+  if (!rootStat?.isDirectory) {
     if (rootStat) errors.push({ file: '.', location: '$', message: `source directory does not exist: ${sourceDir}` });
     return { documents, edges, layer_rules, tag_mappings, errors };
   }

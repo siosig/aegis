@@ -9,7 +9,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import { parseSharedSource } from './source-parser.js';
 import type { SharedSourceParseResult, SourceParseError } from './source-types.js';
 

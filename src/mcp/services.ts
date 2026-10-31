@@ -16,6 +16,11 @@ import { deployCursorAdapter } from '../adapters/cursor/generate.js';
 import { deploySkills } from '../adapters/skills.js';
 import type { AdapterConfig, AdapterResult } from '../adapters/types.js';
 import type { ObservationAnalyzer } from '../core/automation/analyzer.js';
+import {
+  type ApprovePendingOptions,
+  type ApprovePendingResult,
+  approvePendingProposals,
+} from '../core/automation/approve-pending.js';
 import { CompileMissAnalyzer } from '../core/automation/compile-miss-analyzer.js';
 import { DocGapAnalyzer } from '../core/automation/doc-gap-analyzer.js';
 import {
@@ -41,6 +46,7 @@ import {
   parseImportPlanJson,
   splitMarkdownSections,
 } from '../core/optimization/import-plan.js';
+import type { SemanticStalenessScanStats } from '../core/optimization/index.js';
 import {
   collectSemanticStalenessFindings,
   SEMANTIC_STALENESS_ALGORITHM_VERSION,
@@ -66,6 +72,7 @@ import {
   SOURCE_SYNC_STALE_WARNING_DAYS,
 } from '../core/source-sync-staleness.js';
 import type { Repository } from '../core/store/repository.js';
+import type { DbCompactionReport } from '../core/store/snapshot-pruning.js';
 import type { IntentTagger } from '../core/tagging/tagger.js';
 import type {
   AegisStats,
@@ -139,8 +146,11 @@ export interface MaintenanceRunResult {
       algorithm_version: string;
       findings: StalenessDetectedPayload[];
       baseline_writes: number;
+      scan_stats: SemanticStalenessScanStats;
     };
   };
+  /** FR-016: freelist stats and whether VACUUM ran (dry-run reports the threshold only). */
+  db_compaction: DbCompactionReport;
 }
 
 export class SurfaceViolationError extends Error {
@@ -579,6 +589,12 @@ export class AegisService {
     return this.repo.approveProposalBundle(bundleId, this.projectRoot);
   }
 
+  /** Admin only. Not registered as an MCP tool (CLI `approve-pending` only). */
+  approvePending(options: ApprovePendingOptions, surface: Surface): ApprovePendingResult {
+    this.assertAdmin('aegis_approve_pending', surface);
+    return approvePendingProposals(this.repo, options, this.projectRoot);
+  }
+
   rejectProposal(proposalId: string, reason: string, surface: Surface): { proposal_id: string; status: 'rejected' } {
     this.assertAdmin('aegis_reject_proposal', surface);
     this.repo.rejectProposal(proposalId, reason);
@@ -672,7 +688,7 @@ export class AegisService {
   applyUpgrade(surface: Surface): { proposal_ids: string[] } {
     this.assertAdmin('aegis_apply_upgrade', surface);
     const preview = detectUpgrade(this.repo, this.templatesRoot, this.extraTemplateDirs);
-    if (!preview || !preview.has_changes) {
+    if (!preview?.has_changes) {
       return { proposal_ids: [] };
     }
 
@@ -819,8 +835,12 @@ export class AegisService {
         algorithm_version: SEMANTIC_STALENESS_ALGORITHM_VERSION,
         findings: semantic_scan.findings,
         baseline_writes: semantic_scan.baselineUpserts.length,
+        scan_stats: semantic_scan.stats,
       },
     };
+
+    // Outside any transaction (VACUUM cannot run inside one); also called on dry-run (threshold report only).
+    const db_compaction = this.repo.compactDatabaseIfNeeded(dryRun);
 
     return {
       dry_run: dryRun,
@@ -830,6 +850,7 @@ export class AegisService {
       check_upgrade,
       co_change_cache,
       staleness_report,
+      db_compaction,
     };
   }
 

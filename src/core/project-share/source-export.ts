@@ -7,7 +7,7 @@
 
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import type { Repository } from '../store/repository.js';
 import type { Document, Edge, LayerRule, TagMapping } from '../types.js';
 

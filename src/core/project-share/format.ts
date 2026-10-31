@@ -10,7 +10,7 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import yaml from 'js-yaml';
+import * as yaml from 'js-yaml';
 import { RECOGNIZED_EDGE_FILES } from './source-types.js';
 
 // -- Result type -------------------------------------------------------

@@ -194,6 +194,21 @@ Snapshot #3:
   └─ snapshot_layer_rules: [{rule_id, path_pattern, ...}, ...]
 ```
 
+### 世代の刈り込み
+
+Snapshot を作成するたびに（`createSnapshot()` の末尾で）、保持する世代以外の内容行を刈り込む。
+
+- 保持する世代: `knowledge_version` 降順の直近 N 世代（既定 20。環境変数 `AEGIS_SNAPSHOT_RETENTION` で変更）に加えて、`compile_log`・`observations`・`init_manifest` から参照される世代
+- 保持外の世代は、`snapshot_docs`・`snapshot_edges`・`snapshot_layer_rules` の内容行だけを削除する。`snapshots` のヘッダ行は残る
+- `AEGIS_SNAPSHOT_RETENTION` は正の整数のみ有効。無効な値は警告を stderr に 1 回出して既定値になる
+- 刈り込みの失敗は承認を失敗させない。stderr に出力して、次回の Snapshot 作成時に再試行する
+
+### 運用上の注意
+
+- **`approve-pending`**: `aegis approve-pending` は pending の提案を 1 回の実行でまとめて承認する。CLI（admin）専用で、MCP には公開しない（INV-6）。提案は固定の型順 `APPROVE_PENDING_TYPE_ORDER`（`bootstrap`、`new_doc`、`update_doc`、`add_edge`、`retarget_edge`、`remove_edge`、`deprecate`、`materialize`）に 1 件ずつ承認する。`--types <t1,t2,...>` で提案の型を絞り、`--dry-run` で DB を変えずに承認対象を列挙する。束ねた提案（`bundle_id` を持つもの）は `reason: bundled` で skipped にし、`aegis_approve_proposal_bundle` で承認する。承認の直前に pending でなかった提案と、承認トランザクションが失敗した後に再取得して pending でなかった提案（別プロセスが先に承認した場合など）も、失敗ではなく `reason: no_longer_pending` の skipped にする。失敗を含むときの終了コードは 1 で、標準出力の JSON を切らないよう `process.exitCode` で設定する。
+- **staleness の検査対象**: `maintenance` は `git ls-files --cached --others --exclude-standard`（git 管理下のファイルと、git の無視対象ではない未追跡ファイル）で検査対象を列挙する。git の作業ツリーの外、`git` が使えない環境、またはプロジェクトのルート自体が上位リポジトリの設定で無視されているとき（`git check-ignore -q -- .` が終了コード 0）は、従来のディレクトリ走査にフォールバックする。作業ツリー内で `git ls-files` 自体が失敗したときは、フォールバックせず `maintenance` を失敗にする。
+- **動作環境**: Node.js 26 以上。
+
 ### 単調増加バージョン (INV-4)
 
 ```
@@ -389,6 +404,7 @@ Aegis が維持する6つの不変条件:
 ### INV-3: Snapshot 不変性
 - Snapshot 作成後、その内容は変更不可
 - `snapshot_docs`, `snapshot_edges`, `snapshot_layer_rules` は INSERT-only
+- 保持外の世代（直近 N 世代、および `compile_log`・`observations`・`init_manifest` から参照されない世代）の内容行は刈り込まれうる（「5. Snapshot とコンテンツアドレス可能バージョニング」の「世代の刈り込み」を参照）。残した行は変更しない
 
 ### INV-4: 単調増加バージョン
 - `knowledge_meta.current_version` は常に +1
