@@ -1,7 +1,7 @@
 ---
 description: "aegis（このフォーク）の内部設計（モジュール構成、不変条件と強制箇所、Observation から Canonical までの流れ、sql.js の DB 層の書き込み経路、snapshot の保持、staleness の Level 1〜3 と基準値）と、ADR 001〜020 のうち元に戻してはいけない判断の理由。コードを改修する前、とくにサーフェスの境界・承認の経路・DB の書き込み・staleness・CLI と MCP の分担に触る前に読む。"
 updated: 2026-11-01
-keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P-1, P-3, ADR, Do not undo, sql.js, lock, reload, persist, staleness, baseline, 基準値, approve-pending, staleness-ack, observation, proposal, snapshot, pruning, VACUUM, not installed]
+keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P-1, P-3, ADR, Do not undo, sql.js, lock, reload, persist, staleness, baseline, 基準値, approve-pending, staleness-ack, edges, resolve, routeBase, openDatabaseSnapshot, observation, proposal, snapshot, pruning, VACUUM, not installed]
 ---
 # aegis 設計
 
@@ -15,15 +15,16 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 
 ## モジュール構成
 
-`src/core/` は `src/mcp/`・`src/adapters/`・`src/expansion/` を import しない。外側の層が core を使う一方向の依存である。
+`src/core/` は `src/mcp/`・`src/adapters/`・`src/expansion/` を import しない（`src/cli/` も import しない）。外側の層が core を使う一方向の依存である。
 
 | パス | 役割 |
 |---|---|
 | `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け、起動モード（待機モード）による DB・サーバーの選択、MCP サーバーの起動 |
+| `src/cli/` | CLI のサブコマンドの引数の解析と実行（`read-commands.ts`: `edges`・`resolve`）。`src/core/` だけを使い、`src/mcp/` を import しない（`AegisService` を通さない） |
 | `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `ssa`・`admin` のときに ssa の 7 ツールを、`admin` のときだけ残りの管理用の 11 ツールを登録する。待機モードでは `createDormantAegisServer` が 2 本だけを登録する |
 | `src/mcp/services.ts` | サービスの窓口（`AegisService`）。管理用の操作は先頭で `assertSurfaceAllows` を呼ぶ（判定は `isOperationAllowedOnSurface`、ssa の許可リストは `SSA_ALLOWED_OPERATIONS`）。Observation の検証、分析器の登録表、`maintenance`、アダプタの配布もここ |
 | `src/mcp/tool-error.ts` | ツールのエラー応答に原因を必ず含める補助 |
-| `src/core/read/` | `compiler.ts`（DAG のたどり方・notices）、`allocator.ts`（delivery の割り当て）、`workspace-status.ts` |
+| `src/core/read/` | `compiler.ts`（DAG のたどり方・notices）、`allocator.ts`（delivery の割り当て）、`workspace-status.ts`、`knowledge-query.ts`（`edges`・`resolve` の出力の組み立て。base の照合は `compiler.ts` の `routeBase` を compile と共有する） |
 | `src/core/store/` | `database.ts`（sql.js の包装・ロック・永続化）、`repository.ts`（Canonical の読み書き・承認・snapshot）、`schema.ts`、`migrations/`（001〜016）、`snapshot-pruning.ts` |
 | `src/core/automation/` | Observation の分析器、提案の作成（`propose.ts`）、一括承認（`approve-pending.ts`） |
 | `src/core/optimization/` | staleness の検査（`staleness.ts`）、ファイルの列挙（`repo-file-listing.ts`）、staleness の確定（`staleness-ack.ts`）、取り込み計画、エッジ候補、文書分割の判定、co-change のキャッシュ |
@@ -101,6 +102,8 @@ sequenceDiagram
 - `createDatabase` はロックを取ってから読み、スキーマの作成・移行・`knowledge_meta` の初期行の用意をロックの下で行う。ファイルを書くのは、新規か、スキーマか移行で変化があったときだけである。0 バイトの既存ファイルは 1 度だけ読み直し、それでも空なら開かない。
 - 元に戻さないこと: ロックと読み直しを省いて書く経路を作らない。全体を書き出す方式なので、読み直さずに書くと他のプロセスの変更を消す。直接の上書き（rename を使わない書き込み）にも戻さない。書き込みの途中で落ちると DB が壊れる。開くだけで書き出す形にも戻さない。最新の DB を開くたびにファイルが書き換わり、他のプロセスに読み直しを強いる。
 
+読み取り専用のスナップショットの経路: `openDatabaseSnapshot` はロックを取らずにファイルを 1 回読み、`dbPath = null` の `AegisDatabase` に載せる。移行と compile の TEMP TABLE はメモリ上だけで終わり、ファイルにもその隣にも触れない。書き手が一時ファイルと rename で置き換えるので、ロック無しで読んでも完全な内容を読む。**元に戻さないこと**: この経路でロックを取る・ファイルへ書き出す形にしない。`createDatabase` で代えない（ロックの取得と移行の書き戻しが起き、FR-007 に反する）。
+
 ## snapshot の保持と圧縮
 
 - 判断: `createSnapshot` の最後で `pruneSnapshots` を呼び、`knowledge_version` の新しい順に保持数（既定 20、`AEGIS_SNAPSHOT_RETENTION`）の世代と、`compile_log`・`observations`・`init_manifest` から参照される世代を残す。それ以外の世代は内容行（`snapshot_docs`・`snapshot_edges`・`snapshot_layer_rules`）だけを消し、見出しの行は残す。刈り込みの失敗はログに出すだけで、承認を失敗させない。`VACUUM` は `maintenance` の最後に、トランザクションの外で、空き領域が 1 MiB 以上かつファイルの 25% 以上のときだけ実行する（ADR-019 D-4）。
@@ -131,6 +134,14 @@ sequenceDiagram
 - 判断: コードだけが変わったことによる Level 3 の指摘は、エッジを変えても消えない。人が文書とコードを照らして確かめた後に、admin 専用の CLI `staleness-ack` で確定する。確定は 2 段で行う。まず現在の Level 3 の指摘を数え、次に基準値なしとして取り直す。基準値の書き込みと Level 3 の Observation のアーカイブは 1 トランザクションで行う（ADR-019 D-1）。
 - 理由: `maintenance` はドリフトの無い回にしか基準値を書き直さないので、確定の操作が無いと指摘が永久に残る。Observation もアーカイブしないと、重複除去によって同じ指摘が二度と記録されない。
 - 元に戻さないこと: どちらも MCP のツールにしない。`aegis_approve_proposal` に配列の引数を足す形でも一括承認を MCP に出さない。バンドルに属する提案は一括承認に混ぜず、全部か無しかの `aegis_approve_proposal_bundle` に任せる。
+
+## edges と resolve の設計
+
+- 判断: `edges` と `resolve` は読み取り専用の CLI で、MCP のツールにしない。実装は `src/cli/read-commands.ts`（引数の解析と終了コード）と `src/core/read/knowledge-query.ts`（出力の組み立て）に分け、`AegisService` を通さず `src/core/` を直接使う。DB は `openDatabaseSnapshot` で開く。
+- 判断: `resolve` の照合は `ContextCompiler.routeBase` を呼ぶ。`compile` も同じ `routeBase` を呼ぶので、1 つのパスだけを渡した `aegis_compile_context` の `base` と、文書の並び・`source_path`・`resolution_path` が一致する。delivery の割り当て（allocator）は通さないので、予算超過でも照合の結果を返す。
+- 理由: ssa の検査スクリプトが、MCP サーバーを起動せずに CLI 1 回で「承認済みのエッジの全体」と「パスごとに配られる文書」を JSON で受け取って照合する。照合を別に実装すると compile とずれ、決定性（P-1）の保証が崩れる。
+- 理由: 通常の `createDatabase` はロックを取り、移行があればファイルへ書き戻す。読むだけの CLI が他のプロセスの書き込みを待ったり、ファイルを書き換えたりしないよう、`openDatabaseSnapshot` でロック無しにファイルを 1 回読み、メモリ上の複製で動かす。
+- 元に戻さないこと: `resolve` に照合を再実装しない（`routeBase` を共有する）。`edges`・`resolve` で `createDatabase` を使わない、`runInitialBaselineSourcePathMigration` を呼ばない、`compile_log` を書かない。`src/core/` から `src/cli/` を import しない。
 
 ## 未導入プロジェクトの待機モードの判断
 
@@ -204,6 +215,7 @@ sequenceDiagram
 
 | 資料 | 確認日 | 内容 |
 |---|---|---|
+| `src/cli/read-commands.ts`・`src/core/read/knowledge-query.ts` | 2026-11-01 | edges・resolve の解析・出力・終了コード |
 | `src/main.ts` | 2026-11-01 | 待機モードの判定、DB の選択、CLI の振り分け、`approve-pending`・`staleness-ack` の終了コード |
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | 2026-11-01 | ツールの登録の分岐、`assertSurfaceAllows`・`SSA_ALLOWED_OPERATIONS`、分析器の登録表、`analyzeAndPropose`、`runMaintenance` |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts` | 2026-11-01 | 文書の選び方と並べ方、notices、delivery の採用順 |

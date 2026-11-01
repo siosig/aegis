@@ -95,6 +95,8 @@ src/
                   PrMergedAnalyzer, ManualNoteAnalyzer, ProposeService
     tagging/    — IntentTagger port (tag extraction interface)
     types.ts    — All TypeScript type definitions
+  cli/
+    read-commands.ts — Read-only CLI subcommands `edges` / `resolve` (argument parsing, exit codes; uses src/core only)
   mcp/
     server.ts   — MCP tool registration (surface-conditional)
     services.ts — Service facade (INV-6 enforcement)

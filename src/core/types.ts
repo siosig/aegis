@@ -370,6 +370,18 @@ export interface ResolvedEdge {
   edge_type: EdgeType;
 }
 
+/** One approved edge with its target document's source_path (CLI `edges --json`). */
+export interface EdgeListItem {
+  edge_id: string;
+  edge_type: EdgeType;
+  source_type: EdgeSourceType;
+  source_value: string;
+  target_doc_id: string;
+  source_path: string | null;
+  priority: number;
+  specificity: number;
+}
+
 // ============================================================
 // Compile Audit Meta (ADR-009 D-13)
 // ============================================================

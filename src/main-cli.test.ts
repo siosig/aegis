@@ -5,7 +5,16 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execPath } from 'node:process';
@@ -16,6 +25,52 @@ import { Repository } from './core/store/repository.js';
 
 function hash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Bootstrap documents and edges through the standard Proposed → approve flow
+ * (same shape as src/core/read/compiler.test.ts).
+ */
+function bootstrap(
+  repo: Repository,
+  data: {
+    documents: {
+      doc_id: string;
+      title: string;
+      kind: string;
+      content: string;
+      source_path?: string;
+      ownership?: string;
+    }[];
+    edges: {
+      edge_id: string;
+      source_type: string;
+      source_value: string;
+      target_doc_id: string;
+      edge_type: string;
+      priority: number;
+      specificity?: number;
+    }[];
+  },
+) {
+  repo.insertProposal({
+    proposal_id: 'boot',
+    proposal_type: 'bootstrap',
+    payload: JSON.stringify({
+      documents: data.documents.map((d) => ({
+        ...d,
+        content_hash: hash(d.content),
+      })),
+      edges: data.edges.map((e) => ({
+        ...e,
+        specificity: e.specificity ?? 0,
+      })),
+      layer_rules: [],
+    }),
+    status: 'pending',
+    review_comment: null,
+  });
+  return repo.approveProposal('boot');
 }
 
 const MAIN_JS = join(dirname(fileURLToPath(import.meta.url)), '../dist/main.js');
@@ -1129,5 +1184,226 @@ describe('MCP server startup — dormant mode gate (dist/main.js)', () => {
     expect(existsSync(join(dir, 'custom', 'x.db'))).toBe(true);
     expect(existsSync(join(dir, 'custom', '.gitignore'))).toBe(true);
     expect(existsSync(join(dir, '.aegis'))).toBe(false);
+  }, 15_000);
+});
+
+describe('CLI — edges (dist/main.js)', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'aegis-cli-edges-'));
+    mkdirSync(join(dir, '.aegis'), { recursive: true });
+    const db = await createDatabase(join(dir, '.aegis', 'aegis.db'));
+    const repo = new Repository(db);
+    bootstrap(repo, {
+      documents: [{ doc_id: 'doc-a', title: 'A', kind: 'guideline', content: 'A', source_path: 'docs/a.md' }],
+      edges: [
+        {
+          edge_id: 'e-1',
+          source_type: 'path',
+          source_value: 'src/**',
+          target_doc_id: 'doc-a',
+          edge_type: 'path_requires',
+          priority: 100,
+        },
+      ],
+    });
+    // Release the file + advisory lock before spawning the CLI.
+    db.close();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('prints the edge list as JSON, deterministically', () => {
+    const args = [MAIN_JS, 'edges', '--json', '--project-root', dir];
+    const r1 = spawnSync(execPath, args, { encoding: 'utf-8' });
+    expect(r1.status, `stderr: ${r1.stderr}`).toBe(0);
+    expect(r1.stderr).toBe('');
+    const body = JSON.parse(r1.stdout) as { edges: { edge_id: string; source_path: string | null }[] };
+    expect(body.edges.map((e) => e.edge_id)).toEqual(['e-1']);
+    expect(body.edges[0].source_path).toBe('docs/a.md');
+    const r2 = spawnSync(execPath, args, { encoding: 'utf-8' });
+    expect(r2.stdout).toBe(r1.stdout);
+  }, 15_000);
+
+  it('exits 2 when --json is missing', () => {
+    const r = spawnSync(execPath, [MAIN_JS, 'edges', '--project-root', dir], { encoding: 'utf-8' });
+    expect(r.status).toBe(2);
+    expect(r.stdout).toBe('');
+    expect(r.stderr.trim()).toBe('[aegis] edges: --json is required');
+  }, 15_000);
+
+  it('exits 2 without creating .aegis/ when the DB does not exist', () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'aegis-cli-edges-empty-'));
+    try {
+      const r = spawnSync(execPath, [MAIN_JS, 'edges', '--json', '--project-root', emptyDir], {
+        encoding: 'utf-8',
+      });
+      expect(r.status).toBe(2);
+      expect(r.stdout).toBe('');
+      expect(r.stderr).toContain('Database not found');
+      expect(existsSync(join(emptyDir, '.aegis'))).toBe(false);
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
+  }, 15_000);
+});
+
+describe('CLI — resolve (dist/main.js)', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'aegis-cli-resolve-'));
+    mkdirSync(join(dir, '.aegis'), { recursive: true });
+    const db = await createDatabase(join(dir, '.aegis', 'aegis.db'));
+    const repo = new Repository(db);
+    bootstrap(repo, {
+      documents: [{ doc_id: 'doc-a', title: 'A', kind: 'guideline', content: 'A', source_path: 'docs/a.md' }],
+      edges: [
+        {
+          edge_id: 'e-1',
+          source_type: 'path',
+          source_value: 'src/**',
+          target_doc_id: 'doc-a',
+          edge_type: 'path_requires',
+          priority: 100,
+        },
+      ],
+    });
+    // Release the file + advisory lock before spawning the CLI.
+    db.close();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('resolves each path, normalizing before matching', () => {
+    const r = spawnSync(
+      execPath,
+      [MAIN_JS, 'resolve', 'src/main.ts', './src/main.ts', 'no/such.txt', '--project-root', dir],
+      { encoding: 'utf-8' },
+    );
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    expect(r.stderr).toBe('');
+    const body = JSON.parse(r.stdout) as {
+      results: {
+        path: string;
+        normalized_path: string;
+        documents: { doc_id: string; source_path: string | null }[];
+      }[];
+    };
+    expect(body.results.length).toBe(3);
+    expect(body.results[0].documents.map((d) => d.doc_id)).toEqual(['doc-a']);
+    expect(body.results[0].documents[0].source_path).toBe('docs/a.md');
+    expect(body.results[1].normalized_path).toBe('src/main.ts');
+    expect(body.results[1].documents).toEqual(body.results[0].documents);
+    expect(body.results[2].documents).toEqual([]);
+  }, 15_000);
+
+  it('exits 2 when no path is given', () => {
+    const r = spawnSync(execPath, [MAIN_JS, 'resolve', '--project-root', dir], { encoding: 'utf-8' });
+    expect(r.status).toBe(2);
+    expect(r.stdout).toBe('');
+    expect(r.stderr.trim()).toBe('[aegis] resolve: at least one <path> is required');
+  }, 15_000);
+
+  it('exits 2 when a path is outside the project root', () => {
+    const r = spawnSync(execPath, [MAIN_JS, 'resolve', '../x.ts', '--project-root', dir], { encoding: 'utf-8' });
+    expect(r.status).toBe(2);
+    expect(r.stdout).toBe('');
+    expect(r.stderr.trim()).toBe('[aegis] resolve: path is outside the project root: ../x.ts');
+  }, 15_000);
+});
+
+describe('CLI — edges / resolve are read-only (dist/main.js)', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'aegis-cli-readonly-'));
+    mkdirSync(join(dir, '.aegis'), { recursive: true });
+    const db = await createDatabase(join(dir, '.aegis', 'aegis.db'));
+    const repo = new Repository(db);
+    bootstrap(repo, {
+      documents: [{ doc_id: 'doc-a', title: 'A', kind: 'guideline', content: 'A', source_path: 'docs/a.md' }],
+      edges: [
+        {
+          edge_id: 'e-1',
+          source_type: 'path',
+          source_value: 'src/**',
+          target_doc_id: 'doc-a',
+          edge_type: 'path_requires',
+          priority: 100,
+        },
+      ],
+    });
+    // Release the file + advisory lock before spawning the CLI.
+    db.close();
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function aegisDirState(root: string): { sha: string; mtimeMs: number; entries: string[] } {
+    const dbPath = join(root, '.aegis', 'aegis.db');
+    return {
+      sha: createHash('sha256').update(readFileSync(dbPath)).digest('hex'),
+      mtimeMs: statSync(dbPath).mtimeMs,
+      entries: readdirSync(join(root, '.aegis')).sort(),
+    };
+  }
+
+  it('leaves the DB bytes, mtime and .aegis/ entries unchanged', () => {
+    const before = aegisDirState(dir);
+    const e = spawnSync(execPath, [MAIN_JS, 'edges', '--json', '--project-root', dir], { encoding: 'utf-8' });
+    const r = spawnSync(execPath, [MAIN_JS, 'resolve', 'src/main.ts', '--project-root', dir], {
+      encoding: 'utf-8',
+    });
+    expect(e.status, `stderr: ${e.stderr}`).toBe(0);
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    expect(aegisDirState(dir)).toEqual(before);
+  }, 15_000);
+
+  it('does not take the advisory lock (a fresh lock file does not block or get removed)', () => {
+    // Fresh mtime: not discarded as stale (LOCK_STALE_MS = 30_000), so an implementation
+    // that acquired the lock would wait LOCK_TIMEOUT_MS = 5_000 and fail.
+    const lockPath = join(dir, '.aegis', 'aegis.db.lock');
+    writeFileSync(lockPath, '');
+    const t0 = Date.now();
+    const e = spawnSync(execPath, [MAIN_JS, 'edges', '--json', '--project-root', dir], {
+      encoding: 'utf-8',
+      timeout: 4_000,
+    });
+    const r = spawnSync(execPath, [MAIN_JS, 'resolve', 'src/main.ts', '--project-root', dir], {
+      encoding: 'utf-8',
+      timeout: 4_000,
+    });
+    const elapsed = Date.now() - t0;
+    expect(e.status, `stderr: ${e.stderr}`).toBe(0);
+    expect(r.status, `stderr: ${r.stderr}`).toBe(0);
+    expect(elapsed).toBeLessThan(3_000);
+    expect(existsSync(lockPath)).toBe(true);
+  }, 15_000);
+
+  it('exits 2 and creates nothing when the DB does not exist', () => {
+    const emptyDir = mkdtempSync(join(tmpdir(), 'aegis-cli-readonly-empty-'));
+    try {
+      const e = spawnSync(execPath, [MAIN_JS, 'edges', '--json', '--project-root', emptyDir], {
+        encoding: 'utf-8',
+      });
+      const r = spawnSync(execPath, [MAIN_JS, 'resolve', 'src/a.ts', '--project-root', emptyDir], {
+        encoding: 'utf-8',
+      });
+      expect(e.status).toBe(2);
+      expect(e.stdout).toBe('');
+      expect(r.status).toBe(2);
+      expect(r.stdout).toBe('');
+      expect(readdirSync(emptyDir)).toEqual([]);
+    } finally {
+      rmSync(emptyDir, { recursive: true, force: true });
+    }
   }, 15_000);
 });

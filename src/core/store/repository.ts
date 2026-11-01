@@ -18,6 +18,7 @@ import {
   type DocOwnership,
   type Document,
   type Edge,
+  type EdgeListItem,
   type EdgeSourceType,
   type EdgeType,
   type EntityStatus,
@@ -498,6 +499,25 @@ export class Repository {
     return this.db
       .prepare('SELECT * FROM edges WHERE source_type = ? AND status = ?')
       .all(sourceType, 'approved') as Edge[];
+  }
+
+  /** All approved edges with the target document's source_path (any document status), in a fixed byte-wise order. */
+  listApprovedEdgesWithSourcePath(): EdgeListItem[] {
+    const rows = this.db
+      .prepare(
+        `SELECT e.edge_id, e.edge_type, e.source_type, e.source_value, e.target_doc_id, d.source_path AS source_path, e.priority, e.specificity FROM edges e LEFT JOIN documents d ON d.doc_id = e.target_doc_id WHERE e.status = 'approved' ORDER BY e.edge_type, e.source_value, e.target_doc_id, e.edge_id`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      edge_id: row.edge_id as string,
+      edge_type: row.edge_type as EdgeType,
+      source_type: row.source_type as EdgeSourceType,
+      source_value: row.source_value as string,
+      target_doc_id: row.target_doc_id as string,
+      source_path: (row.source_path as string | null) ?? null,
+      priority: row.priority as number,
+      specificity: row.specificity as number,
+    }));
   }
 
   insertEdge(edge: Omit<Edge, 'created_at'>): void {

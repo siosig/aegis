@@ -1,7 +1,7 @@
 ---
 description: "aegis（このフォーク）の現行の外部仕様（MCP サーバーの起動引数、DB の場所と待機モード、サーフェスごとのツール、aegis_compile_context の入出力、CLI のサブコマンドと終了コード、環境変数、永続ファイル、フォーク固有の振る舞い）。ツールや CLI の挙動を変える・呼び出し方を確かめる・既定値を調べるときに読む。"
 updated: 2026-11-01
-keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, dormant, 待機モード, CLAUDE.md, AEGIS_SNAPSHOT_RETENTION]
+keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, edges, resolve, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, dormant, 待機モード, CLAUDE.md, AEGIS_SNAPSHOT_RETENTION]
 ---
 # aegis 仕様
 
@@ -10,7 +10,7 @@ keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, no
 - aegis は、編集対象のファイルパスから DAG（パスと文書を結ぶエッジ）をたどり、AI エージェントに渡す文書の集合を決定的に返す MCP サーバー（stdio）である。パッケージは `@fuwasegu/aegis` 版 1.1.0、入口は `dist/main.js`、Node.js 26 以上を要する。
 - MCP のツールは 3 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`ssa` サーフェスは agent の 6 ツールに 7 ツールを足した 13 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する（`agent` ⊂ `ssa` ⊂ `admin`）。ただし、プロジェクトに導入の目印が無く `--db` も無いときは待機モードで起動し、サーフェスによらず 2 ツール（`aegis_init_detect`・`aegis_workspace_status`）だけを登録する。
 - 知識の正本（Canonical Knowledge）は SQLite の DB にある。MCP サーバーは、`--db` を明示したとき、または導入の目印（プロジェクトルートの `CLAUDE.md` の `aegis: 導入済み` を含む行、または `.aegis`）があるときだけ DB ファイルを開く・作る。どちらでもなければ待機モードで動き、空のインメモリ DB を使い、ファイルを作らず、「未導入」を stderr と `aegis_workspace_status` の応答で知らせる。
-- 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`stats`・`doctor`・`share-*` の 6 種）。
+- 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`edges`・`resolve`・`stats`・`doctor`・`share-*` の 6 種）。
 - 内部設計と「元に戻してはいけない判断」の理由は `docs/plan.md` に置く。本書は外から観測できる振る舞いだけを書く。
 
 ## MCP サーバーの起動引数
@@ -214,6 +214,8 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 | `maintenance` | `--dry-run`、`--days <N>`（既定 90）、`--project-root`、`--db`、`--templates`、`--template-dir` | Observation の分析、文書の同期、アーカイブ、テンプレートの更新確認、co-change のキャッシュ、staleness の検査、DB の圧縮を順に行い、6 つの節の要約を出す。DB ファイルが無い・`--days` が正の整数でなければ 1。`--dry-run` でなく、Observation の分析に失敗が 1 件でもあれば 1。それ以外は 0 |
 | `approve-pending` | `--dry-run`、`--types <t1,t2>`、`--project-root`、`--db`、`--templates`、`--template-dir` | pending の提案を一括で承認する（「フォーク固有の振る舞い」の節）。stdout に JSON 1 つ、stderr に要約 1 行。完了で 0、承認の失敗を含むと 1、引数の誤り・DB ファイルが無い・例外は 2 |
 | `staleness-ack` | `--doc-ids <a,b>` か `--all`（どちらか 1 つが必須）、`--dry-run`、`--project-root`、`--db`、`--templates`、`--template-dir` | 文書の Level 3 の基準値を現在のファイルから取り直し、その文書の Level 3 の `staleness_detected` をアーカイブする。stdout に JSON 1 つ。完了で 0、引数の誤り・未知または未承認の `doc_id`・DB ファイルが無い・例外は 2 |
+| `edges` | `--json`（必須）、`--project-root`、`--db` | 承認済みのエッジの全件を、対象文書の `source_path` 付きで JSON 1 つにして stdout に出す（出力は「edges と resolve の出力」の小節）。読み取り専用。完了で 0、引数の誤り・DB ファイルが無い・例外は 2 |
+| `resolve` | `<path>...`（1 つ以上）、`--json`（任意・意味なし）、`--project-root`、`--db`、`--`（これより後はすべてパス） | パスごとに `aegis_compile_context` の base が配る文書と経路を JSON 1 つにして出す。読み取り専用。終了コードは `edges` と同じ |
 | `stats` | `--project-root`、`--db`、`--templates`、`--template-dir` | 件数・利用状況・健全性・`project_share` を JSON で出す。DB ファイルが無ければ 1、それ以外は 0 |
 | `doctor` | `stats` と同じ | 健全性を人が読む形で出す。古い文書・未分析の Observation・孤立したタグの対応がある、または共有の状態が `bundle_newer`・`local_ahead`・`diverged`・`unreadable_bundle` なら 1。問題が無ければ `Status: OK` を出して 0。DB ファイルが無ければ 1 |
 | `share-export` | `--project-root`、`--db`、`--out <DIR>`（既定 `<root>/aegis-share`） | 承認済みの Canonical を `manifest.json` と `canonical.json` に書き出す。DB ファイルが無い・失敗は 1 |
@@ -225,7 +227,178 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 
 - `maintenance` の要約の節は `process_observations`・`sync_docs`（staleness の報告を含む）・`archive`・`check_upgrade`・`co_change_cache`・`db_compaction` の 6 つである。`--dry-run` では Observation の分析を飛ばし、基準値を書かず、`VACUUM` も実行しない。
 - `stats` と `doctor` は DB を開くだけで、`source_path` の正規化の移行は行わない。ただし DB を開くときにスキーマの移行が必要なら、その分は書き込む。
-- `approve-pending` と `staleness-ack` は未知のオプションと値の無いオプションを引数の誤りとして扱う。ほかのサブコマンドは未知のオプションを無視する。
+- `edges` と `resolve` も `source_path` の正規化の移行を行わない（古い DB の絶対パスの `source_path` はそのまま出る）。DB とその隣のファイルに一切書かず、ロックも取らない。移行が要る古い DB でも移行はメモリ上だけで行う。
+- `approve-pending`・`staleness-ack`・`edges`・`resolve` は未知のオプションと値の無いオプションを引数の誤りとして扱う。ほかのサブコマンドは未知のオプションを無視する。`edges` と `resolve` は `--opt=value` の形も受け付け、`-` で始まる値は `--db=-foo` の形でだけ渡せる（`--db -foo` は値の無いオプションとして誤りになる）。
+
+### edges と resolve の出力
+
+どちらも stdout に JSON を 1 つ、2 空白の字下げで出し、最後に改行を 1 つ付ける。成功のとき stderr には何も出さない。終了コード 1 は使わない。位置引数・上の表にないオプションは引数の誤りである（`resolve` のパスを除く）。`edges` は `--json` が無ければ引数の誤りで、人が読む形の出力は無い。
+
+#### edges
+
+```json
+{
+  "schema_version": 1,
+  "knowledge_version": 98,
+  "edges": [
+    {
+      "edge_id": "8b96c554-b619-431f-8377-8dfa263637bb",
+      "edge_type": "path_requires",
+      "source_type": "path",
+      "source_value": "src/core/read/**",
+      "target_doc_id": "adr-009-compile-context-output-size-control",
+      "source_path": "docs/adr/009-compile-context-output-size-control.md",
+      "priority": 100,
+      "specificity": 0
+    }
+  ]
+}
+```
+
+| フィールド | 型 | 内容 |
+|---|---|---|
+| `schema_version` | 整数 | この形の版。現在は 1 |
+| `knowledge_version` | 整数 | `knowledge_meta.current_version`。未初期化の DB では 0 |
+| `edges`（トップレベルのキー） | 配列 | 承認済みのエッジ。0 件なら `[]` |
+| `edges[].edge_id` | 文字列 | エッジの ID |
+| `edges[].edge_type` | 文字列 | `path_requires`・`layer_requires`・`command_requires`・`doc_depends_on` |
+| `edges[].source_type` | 文字列 | `path`・`layer`・`command`・`doc` |
+| `edges[].source_value` | 文字列 | パターン（パスの glob・レイヤー名・コマンド名・依存元の doc_id） |
+| `edges[].target_doc_id` | 文字列 | 対象文書の doc_id |
+| `edges[].source_path` | 文字列か `null` | 対象文書の `source_path`。文書の状態（承認済みか）を問わず引く。無ければ `null`。移行をしないので、古い DB の絶対パスはそのまま出る |
+| `edges[].priority` | 整数 | エッジの優先度 |
+| `edges[].specificity` | 整数 | エッジの具体性 |
+
+- オブジェクトのキーは上の表の順に出す。
+- 要素の並びは `edge_type` → `source_value` → `target_doc_id` → `edge_id` の昇順で、比較は UTF-8 のバイト列の順（SQLite の BINARY 照合）である。`edge_id` が一意なので、同じ DB の内容からは常に同じバイト列が出る（P-1）。
+- 含めないもの: `draft`・`proposed`・`deprecated` のエッジ、pending の提案に含まれるエッジ（承認されるまで `edges` 表に無い）。対象文書が承認済みでなくても（`deprecated` 等）、エッジが承認済みなら出す。
+
+#### resolve
+
+渡したパスごとに、次の形の要素を `results` に渡した順で入れる（同じパスを 2 回渡せば 2 要素になる）。
+
+```json
+{
+  "schema_version": 1,
+  "knowledge_version": 98,
+  "results": [
+    {
+      "path": "./src/core/paths.ts",
+      "normalized_path": "src/core/paths.ts",
+      "documents": [
+        {
+          "doc_id": "adr-009-compile-context-output-size-control",
+          "source_path": "docs/adr/009-compile-context-output-size-control.md",
+          "resolution_path": [
+            {
+              "edge_id": "801ddfe7-96a9-440c-8c5e-3a63e0fb86d1",
+              "source_type": "path",
+              "source_value": "src/core/paths.ts",
+              "target_doc_id": "adr-009-compile-context-output-size-control",
+              "edge_type": "path_requires"
+            }
+          ]
+        }
+      ],
+      "resolution_path": [
+        {
+          "edge_id": "801ddfe7-96a9-440c-8c5e-3a63e0fb86d1",
+          "source_type": "path",
+          "source_value": "src/core/paths.ts",
+          "target_doc_id": "adr-009-compile-context-output-size-control",
+          "edge_type": "path_requires"
+        }
+      ]
+    },
+    {
+      "path": "no/such/dir/x.txt",
+      "normalized_path": "no/such/dir/x.txt",
+      "documents": [],
+      "resolution_path": []
+    }
+  ]
+}
+```
+
+| フィールド | 型 | 内容 |
+|---|---|---|
+| `schema_version` | 整数 | この形の版。現在は 1 |
+| `knowledge_version` | 整数 | `knowledge_meta.current_version`。未初期化の DB では 0 |
+| `results` | 配列 | 入力のパスごとに 1 要素。渡した順に並べ、重複を除かない |
+| `results[].path` | 文字列 | 入力の原文 |
+| `results[].normalized_path` | 文字列 | 照合に使った値（下の「パスの正規化」） |
+| `results[].documents` | 配列 | base が配る文書。一致が無ければ `[]` |
+| `results[].documents[].doc_id` | 文字列 | 文書の doc_id |
+| `results[].documents[].source_path` | 文字列か `null` | 文書の `source_path` |
+| `results[].documents[].resolution_path` | 配列 | `results[].resolution_path` のうち、`target_doc_id` がこの文書のもの（元の順） |
+| `results[].resolution_path` | 配列 | `aegis_compile_context` の `base.resolution_path` と同じ配列。要素は `edge_id`・`source_type`・`source_value`・`target_doc_id`・`edge_type` の順のキーを持つ |
+
+`source_path` は、`resolve` では文書に無いとき `null` で出る。`aegis_compile_context` の `base.documents` では、無いときキー自体が出ない（`undefined`）。
+
+#### パスの正規化（resolve）
+
+照合の前に、各パスを次の順で字句的に正規化する（`normalizeTargetPath`）。ファイルシステムには触れず（存在しないパスも渡せる）、symlink は解かない。
+
+1. 空文字列なら誤り（`path is empty`）。
+2. `\` をすべて `/` に置き換える。
+3. 絶対パス（実行中の OS の `path.isAbsolute`）なら、`--project-root` の絶対パスからの相対パスにし、OS の区切り文字を `/` にする。
+4. POSIX の規則で `.`・`..`・重なった `/` を畳む（`path.posix.normalize`）。末尾の `/` を除く。
+5. 結果が `.`（ルートそのもの）なら誤り（`path resolves to the project root: <入力>`）。
+6. 結果が `..` か `../` で始まる（ルートの外）、または実行中の OS で絶対パスのまま（Windows で別のドライブのパスなど）なら誤り（`path is outside the project root: <入力>`）。
+
+| 入力（`--project-root /work/proj`） | `normalized_path` |
+|---|---|
+| `src/main.ts` | `src/main.ts` |
+| `./src/main.ts` | `src/main.ts` |
+| `src\core\paths.ts` | `src/core/paths.ts` |
+| `src//main.ts` | `src/main.ts` |
+| `src/../docs/spec.md` | `docs/spec.md` |
+| `docs/./a.md` | `docs/a.md` |
+| `src/` | `src` |
+| `/work/proj/src/main.ts` | `src/main.ts` |
+| `/work/proj`・`/work/proj/`・`.`・`./` | 誤り（ルートそのもの） |
+| `../x.ts`・`src/../../x.ts`・`/etc/passwd`・`/work/projX/a.ts` | 誤り（ルートの外） |
+| （空文字列） | 誤り（空） |
+
+- 照合（`aegis_compile_context` と同じ picomatch の既定のオプション）には `normalized_path` を使う。`aegis_compile_context` は `target_files` を正規化しないので、`./src/main.ts` や絶対パスを渡すと当たらない。`resolve` は正規化してから照合する点だけが違う。
+- `\` は POSIX のファイル名に使える文字だが、エッジのパターンは `/` 区切りなので、常に区切り文字として扱う。
+- symlink を解かないのは、エッジが git の追跡するリポジトリ上のパスを指し、`aegis_compile_context` もパスを字句のまま照合するからである。`--project-root` に symlink を含むパスを渡し、絶対パスを実体のパスで渡すと、ルートの外として誤りになる。
+
+#### aegis_compile_context との一致（resolve、FR-006）
+
+同じ DB に対して、`normalized_path` 1 つだけを `target_files` に渡し、`target_layers`・`command`・`plan`・`intent_tags` を渡さない `aegis_compile_context` を呼んだとき、次の 3 点が一致する。
+
+- `results[].documents` の `doc_id` の並び = `base.documents` の `doc_id` の並び。
+- `results[].documents[].source_path` = `base.documents` の同じ文書の `source_path`。
+- `results[].resolution_path` = `base.resolution_path`。
+
+照合の規則は `aegis_compile_context` と同じコード（`ContextCompiler.routeBase`）である。
+
+1. `path_requires`: 承認済みのパスのエッジのうち、`source_value`（glob）が `normalized_path` に当たるもの。
+2. `layer_requires`: 承認済みのレイヤーの規則で `normalized_path` のレイヤーを決め、そのレイヤーの承認済みのエッジ。
+3. `command_requires`: 使わない（`resolve` は `command` を受け取らない）。
+4. `doc_depends_on`: 1〜2 で集めた文書から、承認済みの依存のエッジをたどった閉包。
+5. 承認済みの文書だけを残し、具体性の降順 → 優先度の昇順 → doc_id の順に並べ、`kind` が `template` の文書を除く（`aegis_compile_context` では `base.templates` に入る）。
+
+出さないもの: `expanded`（`intent_tags`・SLM のタガー）、`base.templates`、`delivery`、`relevance`、`warnings`、`notices`、`compile_id`・`snapshot_id`。
+
+差: `resolve` は delivery の割り当てをしないので、`source_path` の無い文書の合計が予算（既定 128KB）を超えて `aegis_compile_context` が `BudgetExceededError` で失敗する場合も、照合の結果を返す。
+
+#### 未初期化の DB（resolve）
+
+スナップショットが無い（`init_confirm` の前で `knowledge_version` が 0）とき、`aegis_compile_context` と同じく、すべてのパスの `documents` と `resolution_path` を `[]` にして終了コード 0 で返す。`edges` の `knowledge_version` も 0 になる。
+
+#### 終了コードとエラー（edges と resolve）
+
+| 状況 | 終了コード | stdout | stderr（1 行） |
+|---|---|---|---|
+| 成功（`resolve` は一致が無いパスを含んでもよい） | 0 | JSON 1 つ | なし |
+| 引数の誤り（`edges` は `--json` が無い・位置引数・未知のオプション・値の無いオプション・空文字列の値。`resolve` はこれらに加えて、パスが無い・正規化できないパスを含む。`resolve` は DB を開かない） | 2 | なし | `[aegis] edges: <理由>`・`[aegis] resolve: <理由>`（例: `--json is required`、`Unknown option '--bogus'. ...`、`--db requires a non-empty value`、`at least one <path> is required`、`path is outside the project root: ../x.ts`） |
+| DB ファイルが無い | 2 | なし | `[aegis] Database not found at <絶対パス>` |
+| DB ファイルが 0 バイト（1 度読み直しても）・SQLite として読めない・その他の例外 | 2 | なし | `[aegis] edges: <例外のメッセージ（改行は空白に置き換える）>`・`[aegis] resolve: <同左>` |
+
+- 環境変数 `AEGIS_SNAPSHOT_RETENTION` が不正な値のときは、既存の規則どおり警告が stderr に 1 度出る。
+- DB ファイルを読む前後でロック（`<db>.lock`）を作らず、待たない。DB ファイルとその隣（`<db>.lock`・`<db>.tmp-*`・`.aegis/.gitignore`）を作成・変更・削除せず、DB ファイルが無いときディレクトリも作らない。`resolve` は compile_log も書かない。書き手は一時ファイルと rename で DB を置き換えるので、ロックを取らずに読んでも、置き換えの前か後の完全な内容を読む。
 
 ## 環境変数一覧
 
@@ -279,6 +452,7 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 | 資料 | 参照した目的 |
 |---|---|
 | `src/main.ts` | 起動引数・DB の場所と待機モードの判定（`src/core/init/install-marker.ts`）・CLI のサブコマンドと終了コード |
+| `src/cli/read-commands.ts`・`src/core/read/knowledge-query.ts` | `edges`・`resolve` の引数・出力・終了コード |
 | `src/core/init/install-marker.ts` | 導入済みの目印の判定・起動モード・待機モードの文言 |
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | ツールの登録・引数・サーフェスの検査・Observation の検証・エラー応答 |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts`・`src/core/types.ts` | compile の選び方・出力の形・delivery・notices |

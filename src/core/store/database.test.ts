@@ -3,11 +3,47 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createDatabase } from './database.js';
+import { ContextCompiler } from '../read/compiler.js';
+import { createDatabase, openDatabaseSnapshot } from './database.js';
 import { Repository } from './repository.js';
 
 function hash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
+}
+
+// Copied from src/core/read/compiler.test.ts (not exported there): bootstraps docs/edges through the Proposed → approve flow.
+function bootstrap(
+  repo: Repository,
+  data: {
+    documents: { doc_id: string; title: string; kind: string; content: string }[];
+    edges: {
+      edge_id: string;
+      source_type: string;
+      source_value: string;
+      target_doc_id: string;
+      edge_type: string;
+      priority: number;
+    }[];
+  },
+) {
+  repo.insertProposal({
+    proposal_id: 'boot',
+    proposal_type: 'bootstrap',
+    payload: JSON.stringify({
+      documents: data.documents.map((d) => ({
+        ...d,
+        content_hash: hash(d.content),
+      })),
+      edges: data.edges.map((e) => ({
+        ...e,
+        specificity: 0,
+      })),
+      layer_rules: [],
+    }),
+    status: 'pending',
+    review_comment: null,
+  });
+  return repo.approveProposal('boot');
 }
 
 function insertApprovedDoc(repo: Repository, id: string, title: string): void {
@@ -403,5 +439,92 @@ describe('AegisDatabase safe persistence (clobber regression)', () => {
     await createDatabase(dbPath);
     expect(existsSync(dbPath)).toBe(true);
     expect(statSync(dbPath).size).toBeGreaterThan(0);
+  });
+});
+
+describe('openDatabaseSnapshot (read-only)', () => {
+  let tmpDir: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'aegis-db-snap-'));
+    dbPath = join(tmpDir, 'aegis.db');
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function fileState(dir: string, path: string): { sha: string; mtimeMs: number; entries: string[] } {
+    return {
+      sha: createHash('sha256').update(readFileSync(path)).digest('hex'),
+      mtimeMs: statSync(path).mtimeMs,
+      entries: readdirSync(dir).sort(),
+    };
+  }
+
+  it('leaves the DB file and its directory unchanged even when compile writes', async () => {
+    const db = await createDatabase(dbPath);
+    bootstrap(new Repository(db), {
+      documents: [{ doc_id: 'd-a', title: 'Doc A', kind: 'guideline', content: 'a' }],
+      edges: [
+        {
+          edge_id: 'e-a',
+          source_type: 'path',
+          source_value: 'src/**',
+          target_doc_id: 'd-a',
+          edge_type: 'path_requires',
+          priority: 100,
+        },
+      ],
+    });
+    db.close();
+
+    const before = fileState(tmpDir, dbPath);
+    const snap = await openDatabaseSnapshot(dbPath);
+    // compile inserts into compile_log and creates a TEMP TABLE in getTransitiveDependencies
+    await new ContextCompiler(new Repository(snap)).compile({ target_files: ['src/x.ts'] });
+    snap.close();
+
+    const after = fileState(tmpDir, dbPath);
+    expect(after).toEqual(before);
+    expect(after.entries.filter((f) => f.endsWith('.lock'))).toEqual([]);
+    expect(after.entries.filter((f) => f.includes('.tmp-'))).toEqual([]);
+  });
+
+  it('applies migrations to an old DB in memory only', async () => {
+    const db = await createDatabase(dbPath);
+    db.exec('DELETE FROM schema_migrations WHERE version = 15');
+    db.exec('DROP INDEX idx_compile_log_created_at');
+    db.close();
+
+    const before = fileState(tmpDir, dbPath);
+    const snap = await openDatabaseSnapshot(dbPath);
+    expect(snap.prepare('SELECT version FROM schema_migrations WHERE version = 15').all()).toHaveLength(1);
+    expect(
+      snap.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_compile_log_created_at'").all(),
+    ).toHaveLength(1);
+    snap.close();
+
+    expect(fileState(tmpDir, dbPath)).toEqual(before);
+  });
+
+  it('throws on a 0-byte file without leaving lock or temp files', async () => {
+    writeFileSync(dbPath, '');
+    await expect(openDatabaseSnapshot(dbPath)).rejects.toThrow('Aegis DB file exists but is empty');
+    expect(readdirSync(tmpDir)).toEqual(['aegis.db']);
+  });
+
+  it('neither takes nor waits on the lock', async () => {
+    const db = await createDatabase(dbPath);
+    db.close();
+    writeFileSync(`${dbPath}.lock`, '');
+
+    const t0 = Date.now();
+    const snap = await openDatabaseSnapshot(dbPath);
+    snap.close();
+
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(existsSync(`${dbPath}.lock`)).toBe(true);
   });
 });

@@ -2,7 +2,14 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { migrateSourcePaths, normalizeSourcePath, resolveSourcePath, validateInsideProject } from './paths.js';
+import {
+  InvalidTargetPathError,
+  migrateSourcePaths,
+  normalizeSourcePath,
+  normalizeTargetPath,
+  resolveSourcePath,
+  validateInsideProject,
+} from './paths.js';
 import { createInMemoryDatabase, Repository } from './store/index.js';
 
 describe('normalizeSourcePath', () => {
@@ -188,5 +195,48 @@ describe('migrateSourcePaths', () => {
 
     const doc = repo.getDocumentById('draft-doc');
     expect(doc!.source_path).toBe('draft.ts');
+  });
+});
+
+describe('normalizeTargetPath', () => {
+  const root = '/work/proj';
+
+  it.each([
+    ['src/main.ts', 'src/main.ts'],
+    ['./src/main.ts', 'src/main.ts'],
+    ['src\\core\\paths.ts', 'src/core/paths.ts'],
+    ['src//main.ts', 'src/main.ts'],
+    ['src/../docs/spec.md', 'docs/spec.md'],
+    ['docs/./a.md', 'docs/a.md'],
+    ['src/', 'src'],
+    ['/work/proj/src/main.ts', 'src/main.ts'],
+  ])('normalizes %j to %j', (input, expected) => {
+    expect(normalizeTargetPath(input, root)).toBe(expected);
+  });
+
+  function expectInvalid(input: string, message: string): void {
+    try {
+      normalizeTargetPath(input, root);
+    } catch (e) {
+      expect(e).toBeInstanceOf(InvalidTargetPathError);
+      expect((e as Error).message).toBe(message);
+      return;
+    }
+    throw new Error('expected throw');
+  }
+
+  it.each(['/work/proj', '/work/proj/', '.', './'])('rejects the project root itself: %j', (input) => {
+    expectInvalid(input, `path resolves to the project root: ${input}`);
+  });
+
+  it.each(['../x.ts', 'src/../../x.ts', '/etc/passwd', '/work/projX/a.ts'])(
+    'rejects a path outside the project root: %j',
+    (input) => {
+      expectInvalid(input, `path is outside the project root: ${input}`);
+    },
+  );
+
+  it('rejects an empty path', () => {
+    expectInvalid('', 'path is empty');
   });
 });

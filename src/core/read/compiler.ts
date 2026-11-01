@@ -203,6 +203,24 @@ function emptyExpandedTaggingAudit(): ExpandedTaggingAudit {
   };
 }
 
+export type BaseRoutingRequest = Pick<CompileRequest, 'target_files' | 'target_layers' | 'command'>;
+
+export interface DocOrder {
+  specificity: number;
+  priority: number;
+}
+
+/** Deterministic base routing shared by compile() and the CLI `resolve` (steps 1–4, document ordering, resolution_path). */
+export interface BaseRouting {
+  sortedDocs: Document[];
+  docOrderMap: Map<string, DocOrder>;
+  resolutionPath: ResolvedEdge[];
+  collectedDocIdCount: number;
+  nearMissEdges: NearMissEdgeAudit[];
+  layerClassification: Record<string, string | null>;
+  performance: CompilePerformanceMeta;
+}
+
 export class ContextCompiler {
   constructor(
     private repo: Repository,
@@ -248,18 +266,8 @@ export class ContextCompiler {
     };
   }
 
-  /**
-   * compile_context — deterministic base routing + best-effort expanded context.
-   * Steps: path_requires → layer_requires → command_requires → doc_depends_on closure
-   * Then: if plan + tagger → expanded via tag_mappings
-   * Finally: allocator assigns delivery state (ADR-009)
-   */
-  async compile(request: CompileRequest): Promise<CompiledContext> {
-    const snapshot = this.repo.getCurrentSnapshot();
-    if (!snapshot) {
-      return this.emptyResult(request, ['Project not initialized (no snapshot exists)']);
-    }
-
+  /** Base routing only: path_requires → layer_requires → command_requires → doc_depends_on closure. Reads approved knowledge; no compile_log, no allocation. */
+  routeBase(request: BaseRoutingRequest): BaseRouting {
     const collectedEdges: Edge[] = [];
     const collectedDocIds = new Set<string>();
     const nearMissEdges: NearMissEdgeAudit[] = [];
@@ -381,25 +389,6 @@ export class ContextCompiler {
       return a.doc_id.localeCompare(b.doc_id);
     });
 
-    const planTerms = request.plan ? extractPlanTerms(request.plan) : [];
-
-    // ── Build DocCandidate arrays (templates separate from regular docs) ──
-    const baseCandidates: DocCandidate[] = [];
-    const templateCandidates: DocCandidate[] = [];
-    const templateDocIds: string[] = [];
-
-    for (const doc of sortedDocs) {
-      const order = docOrderMap.get(doc.doc_id) ?? { specificity: 0, priority: 100 };
-      const relevance = request.plan && planTerms.length > 0 ? computeRelevance(planTerms, doc) : undefined;
-
-      if (doc.kind === 'template') {
-        templateDocIds.push(doc.doc_id);
-        templateCandidates.push(toCandidate(doc, 'template', order.priority, relevance));
-      } else {
-        baseCandidates.push(toCandidate(doc, 'document', order.priority, relevance));
-      }
-    }
-
     // ── Build resolution_path (deduplicated, phase-ordered) ──
     const seenEdgeIds = new Set<string>();
     const resolutionPath: ResolvedEdge[] = [];
@@ -416,11 +405,55 @@ export class ContextCompiler {
       }
     }
 
+    return {
+      sortedDocs,
+      docOrderMap,
+      resolutionPath,
+      collectedDocIdCount: collectedDocIds.size,
+      nearMissEdges,
+      layerClassification,
+      performance: compilePerformance,
+    };
+  }
+
+  /**
+   * compile_context — deterministic base routing + best-effort expanded context.
+   * Steps: path_requires → layer_requires → command_requires → doc_depends_on closure
+   * Then: if plan + tagger → expanded via tag_mappings
+   * Finally: allocator assigns delivery state (ADR-009)
+   */
+  async compile(request: CompileRequest): Promise<CompiledContext> {
+    const snapshot = this.repo.getCurrentSnapshot();
+    if (!snapshot) {
+      return this.emptyResult(request, ['Project not initialized (no snapshot exists)']);
+    }
+
+    const routing = this.routeBase(request);
+
+    const planTerms = request.plan ? extractPlanTerms(request.plan) : [];
+
+    // ── Build DocCandidate arrays (templates separate from regular docs) ──
+    const baseCandidates: DocCandidate[] = [];
+    const templateCandidates: DocCandidate[] = [];
+    const templateDocIds: string[] = [];
+
+    for (const doc of routing.sortedDocs) {
+      const order = routing.docOrderMap.get(doc.doc_id) ?? { specificity: 0, priority: 100 };
+      const relevance = request.plan && planTerms.length > 0 ? computeRelevance(planTerms, doc) : undefined;
+
+      if (doc.kind === 'template') {
+        templateDocIds.push(doc.doc_id);
+        templateCandidates.push(toCandidate(doc, 'template', order.priority, relevance));
+      } else {
+        baseCandidates.push(toCandidate(doc, 'document', order.priority, relevance));
+      }
+    }
+
     // ── Build result shell ──
     const compileId = uuidv4();
     const warnings: string[] = [];
 
-    if (collectedDocIds.size === 0) {
+    if (routing.collectedDocIdCount === 0) {
       warnings.push(this.buildEmptyResultHint(request));
     }
 
@@ -551,7 +584,7 @@ export class ContextCompiler {
     }
 
     const stalenessDocMap = new Map<string, Document>();
-    for (const d of sortedDocs) {
+    for (const d of routing.sortedDocs) {
       stalenessDocMap.set(d.doc_id, d);
     }
     if (expandedCandidates.length > 0) {
@@ -589,10 +622,10 @@ export class ContextCompiler {
       allocatedDocs = result.docs;
       auditMeta = {
         ...result.audit_meta,
-        near_miss_edges: nearMissEdges,
-        layer_classification: layerClassification,
+        near_miss_edges: routing.nearMissEdges,
+        layer_classification: routing.layerClassification,
         template_doc_ids: templateDocIds,
-        performance: compilePerformance,
+        performance: routing.performance,
         expanded_tagging: expandedTaggingAudit,
       };
     } catch (err) {
@@ -612,11 +645,11 @@ export class ContextCompiler {
           budget_utilization: maxInlineBytes > 0 ? Math.round((err.mandatory_bytes / maxInlineBytes) * 100) / 100 : 0,
           budget_exceeded: true,
           budget_dropped: [],
-          near_miss_edges: nearMissEdges,
-          layer_classification: layerClassification,
+          near_miss_edges: routing.nearMissEdges,
+          layer_classification: routing.layerClassification,
           policy_omitted_doc_ids: [],
           template_doc_ids: templateDocIds,
-          performance: compilePerformance,
+          performance: routing.performance,
           expanded_tagging: expandedTaggingAudit,
         };
 
@@ -684,7 +717,7 @@ export class ContextCompiler {
       knowledge_version: snapshot.knowledge_version,
       base: {
         documents: baseReturned,
-        resolution_path: resolutionPath,
+        resolution_path: routing.resolutionPath,
         templates: templateReturned,
       },
       warnings,
@@ -784,7 +817,7 @@ export class ContextCompiler {
    * If target_layers is explicitly provided, use that.
    * Otherwise, infer from target_files using layer_rules.
    */
-  private resolveLayers(request: CompileRequest): {
+  private resolveLayers(request: BaseRoutingRequest): {
     resolvedLayers: string[];
     layerClassification: Record<string, string | null>;
   } {
@@ -843,8 +876,8 @@ export class ContextCompiler {
    * Build a map of doc_id → best (highest specificity, lowest priority) edge ordering.
    * Used only for display order.
    */
-  private buildDocOrderMap(edges: Edge[]): Map<string, { specificity: number; priority: number }> {
-    const map = new Map<string, { specificity: number; priority: number }>();
+  private buildDocOrderMap(edges: Edge[]): Map<string, DocOrder> {
+    const map = new Map<string, DocOrder>();
     for (const edge of edges) {
       const existing = map.get(edge.target_doc_id);
       if (

@@ -6,7 +6,7 @@
  */
 
 import { realpathSync } from 'node:fs';
-import { dirname, isAbsolute, normalize, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, normalize, posix, relative, resolve, sep } from 'node:path';
 import type { Repository } from './store/repository.js';
 
 /**
@@ -124,4 +124,35 @@ export function migrateSourcePaths(repo: Repository, projectRoot: string): void 
       repo.updateDocumentSourcePath(doc.doc_id, null);
     }
   }
+}
+
+export class InvalidTargetPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidTargetPathError';
+  }
+}
+
+/** Lexically normalizes a CLI target path to a project-relative POSIX path for edge matching (no filesystem access, symlinks are not resolved). */
+export function normalizeTargetPath(inputPath: string, projectRoot: string): string {
+  if (inputPath === '') {
+    throw new InvalidTargetPathError('path is empty');
+  }
+  // Backslashes are separators for edge matching regardless of the host OS.
+  let p = inputPath.replaceAll('\\', '/');
+  if (isAbsolute(p)) {
+    p = relative(projectRoot, p).split(sep).join('/');
+    p = p === '' ? '.' : p;
+  }
+  p = posix.normalize(p);
+  while (p.length > 1 && p.endsWith('/')) {
+    p = p.slice(0, -1);
+  }
+  if (p === '.') {
+    throw new InvalidTargetPathError(`path resolves to the project root: ${inputPath}`);
+  }
+  if (p === '..' || p.startsWith('../') || isAbsolute(p) || posix.isAbsolute(p)) {
+    throw new InvalidTargetPathError(`path is outside the project root: ${inputPath}`);
+  }
+  return p;
 }

@@ -562,6 +562,30 @@ function countAppliedMigrations(db: AegisDatabase): number {
   }
 }
 
+/** Applies PRAGMA, SCHEMA_SQL, migrations and the knowledge_meta row; returns true when the schema, migrations or knowledge_meta changed. */
+function applySchemaAndMigrations(wrapper: AegisDatabase): boolean {
+  let changed = false;
+  wrapper.exec('PRAGMA foreign_keys = ON');
+
+  const objectsBefore = countSchemaObjects(wrapper);
+  const migrationsBefore = countAppliedMigrations(wrapper);
+
+  wrapper.exec(SCHEMA_SQL);
+
+  runMigrations(wrapper, ALL_MIGRATIONS);
+
+  const meta = wrapper.prepare('SELECT id FROM knowledge_meta WHERE id = 1').get();
+  if (!meta) {
+    wrapper.prepare('INSERT INTO knowledge_meta (id, current_version) VALUES (1, 0)').run();
+    changed = true;
+  }
+
+  if (countSchemaObjects(wrapper) !== objectsBefore || countAppliedMigrations(wrapper) !== migrationsBefore) {
+    changed = true;
+  }
+  return changed;
+}
+
 export async function createDatabase(dbPath: string): Promise<AegisDatabase> {
   const SQL = await getSqlJs();
 
@@ -619,30 +643,35 @@ export async function createDatabase(dbPath: string): Promise<AegisDatabase> {
   wrapper._beginBootstrap();
   let persistNeeded = !fileExisted && !isMemory;
   try {
-    wrapper.exec('PRAGMA foreign_keys = ON');
-
-    const objectsBefore = countSchemaObjects(wrapper);
-    const migrationsBefore = countAppliedMigrations(wrapper);
-
-    wrapper.exec(SCHEMA_SQL);
-
-    runMigrations(wrapper, ALL_MIGRATIONS);
-
-    const meta = wrapper.prepare('SELECT id FROM knowledge_meta WHERE id = 1').get();
-    if (!meta) {
-      wrapper.prepare('INSERT INTO knowledge_meta (id, current_version) VALUES (1, 0)').run();
-      persistNeeded = true;
-    }
-
-    if (countSchemaObjects(wrapper) !== objectsBefore || countAppliedMigrations(wrapper) !== migrationsBefore) {
-      persistNeeded = true;
-    }
+    persistNeeded = applySchemaAndMigrations(wrapper) || persistNeeded;
   } catch (e) {
     wrapper._endBootstrap(false);
     throw e;
   }
   wrapper._endBootstrap(persistNeeded);
 
+  return wrapper;
+}
+
+/** Opens a detached in-memory copy of an existing DB file for read-only commands: takes no lock, creates/removes no sibling file, never writes back. */
+export async function openDatabaseSnapshot(dbPath: string): Promise<AegisDatabase> {
+  const SQL = await getSqlJs();
+  let buffer = readFileSync(dbPath);
+  if (buffer.length === 0) {
+    Atomics.wait(WAIT_BUFFER, 0, 0, 100);
+    buffer = readFileSync(dbPath);
+    if (buffer.length === 0) {
+      throw new Error(`Aegis DB file exists but is empty: ${dbPath}`);
+    }
+  }
+  // INVARIANT: dbPath is null, so every write on this connection (compile TEMP TABLE, migrations) stays in memory.
+  const wrapper = new AegisDatabase(new SQL.Database(new Uint8Array(buffer)), null, SQL);
+  wrapper._beginBootstrap();
+  try {
+    applySchemaAndMigrations(wrapper);
+  } finally {
+    wrapper._endBootstrap(false);
+  }
   return wrapper;
 }
 

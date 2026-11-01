@@ -24,6 +24,9 @@
  *   npx aegis approve-pending --types new_doc,add_edge
  *   npx aegis staleness-ack --doc-ids a,b        # Accept reviewed Level-3 drift: re-capture baselines (admin CLI only)
  *   npx aegis staleness-ack --all --dry-run      # List what would be acknowledged (no writes)
+ *   npx aegis edges --json                       # JSON: approved edges with target source_path (read-only; no lock, no writes)
+ *   npx aegis resolve src/a.ts docs/b.md         # JSON: per-path base documents as compile_context would route them (read-only)
+ *   npx aegis resolve --db path/to/aegis.db -- -odd-name.ts
  *   npx aegis stats                              # JSON: knowledge / usage / health (read-only; no DB writes)
  *   npx aegis doctor                             # Health summary; read-only; exits 1 if issues
  *   npx aegis share-export                       # Export approved Canonical to aegis-share/
@@ -56,6 +59,7 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createProcessCliIo, runEdgesCli, runResolveCli } from './cli/read-commands.js';
 import { parseProposalTypesOption } from './core/automation/approve-pending.js';
 import { DEFAULT_DB_DIR, formatDormantStartupMessage, resolveServerStartupMode } from './core/init/install-marker.js';
 import { shareHydrate } from './core/project-share/hydrate.js';
@@ -1120,6 +1124,16 @@ async function main() {
 
   if (subcommand === 'staleness-ack') {
     await handleStalenessAck();
+    return;
+  }
+
+  if (subcommand === 'edges') {
+    process.exitCode = await runEdgesCli(process.argv.slice(3), createProcessCliIo(), process.cwd());
+    return;
+  }
+
+  if (subcommand === 'resolve') {
+    process.exitCode = await runResolveCli(process.argv.slice(3), createProcessCliIo(), process.cwd());
     return;
   }
 
