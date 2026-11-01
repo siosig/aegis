@@ -1,6 +1,6 @@
 /**
  * `--surface` argument of the entry point (src/main.ts), run as a child process via tsx.
- * V-6: `--surface ssa` starts a server exposing the 13 ssa tools.
+ * V-6: `--surface ssa` starts a server exposing the 12 ssa tools.
  * V-7: an invalid surface value exits with code 1.
  * V-8: without an install marker, every surface starts in dormant mode with 2 tools.
  */
@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 const REPO_ROOT = join(import.meta.dirname, '..');
 
 describe('main.ts --surface argument', () => {
-  it('starts with --surface ssa and registers the 13 ssa tools', async () => {
+  it('starts with --surface ssa and registers the 12 ssa tools', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'aegis-ssa-arg-'));
     try {
       writeFileSync(join(dir, 'CLAUDE.md'), 'aegis: 導入済み\n');
@@ -39,10 +39,9 @@ describe('main.ts --surface argument', () => {
             'aegis_get_known_tags',
             'aegis_workspace_status',
             'aegis_init_detect',
-            // ssa extra tools (7)
+            // ssa extra tools (6)
             'aegis_list_proposals',
             'aegis_get_proposal',
-            'aegis_approve_proposal',
             'aegis_archive_observations',
             'aegis_get_stats',
             'aegis_process_observations',

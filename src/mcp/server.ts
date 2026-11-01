@@ -4,10 +4,11 @@
  *
  * Surface separation (INV-6):
  * - Agent Surface: compile_context, observe, get_compile_audit, get_known_tags, workspace_status, init_detect (6 tools)
- * - SSA Surface: the 6 agent tools plus list/get/approve proposal, archive_observations, get_stats,
- *                process_observations, sync_docs (13 tools). See ADR-020.
- * - Admin Surface: the 13 SSA tools plus 11 admin-only (bundle preflight/approve, reject, init_confirm,
- *                  check_upgrade, apply_upgrade, import_doc, analyze_doc, analyze_import_batch,
+ * - SSA Surface: the 6 agent tools plus list/get proposal, archive_observations, get_stats,
+ *                process_observations, sync_docs (12 tools). No approval on ssa: approve via the
+ *                admin surface or the `approve-proposal` CLI. See ADR-020.
+ * - Admin Surface: the 12 SSA tools plus 12 admin-only (approve_proposal, bundle preflight/approve, reject,
+ *                  init_confirm, check_upgrade, apply_upgrade, import_doc, analyze_doc, analyze_import_batch,
  *                  execute_import_plan, list_observations) → 24 tools total
  * - Dormant mode (createDormantAegisServer): Aegis not installed in the project and no --db.
  *   Only workspace_status and init_detect (2 tools) on every surface; no resources.
@@ -23,6 +24,18 @@ import { DORMANT_WORKSPACE_STATUS_NOTICE } from '../core/init/install-marker.js'
 import { BudgetExceededError } from '../core/types.js';
 import { type AegisService, ObserveValidationError, type Surface } from './services.js';
 import { toolErrorResult } from './tool-error.js';
+import {
+  analyzeImportBatchInputShape,
+  applyUpgradeInputShape,
+  approveProposalInputShape,
+  executeImportPlanInputShape,
+  importDocInputShape,
+  initConfirmInputShape,
+  initDetectInputShape,
+  proposalBundleInputShape,
+  rejectProposalInputShape,
+  sourceRefSchema,
+} from './tool-input-schemas.js';
 
 type TextContent = { type: 'text'; text: string };
 
@@ -79,16 +92,6 @@ const WORKFLOW_GUIDE = `# Aegis Workflow Guide
 - **Deterministic context**: Same inputs always produce the same compiled context
 `;
 
-const sourceRefSchema = z
-  .object({
-    asset_path: z.string(),
-    anchor_type: z.enum(['file', 'section', 'lines']),
-    anchor_value: z.string().optional().default(''),
-  })
-  .refine((r) => r.anchor_type === 'file' || (typeof r.anchor_value === 'string' && r.anchor_value.trim() !== ''), {
-    message: 'anchor_value is required when anchor_type is section or lines',
-  });
-
 /**
  * Register `aegis_workspace_status`. When `leadingNotice` is a string (dormant mode) it is returned
  * as `content[0]` ahead of the JSON snapshot; when `null` the response is the JSON snapshot only.
@@ -129,13 +132,7 @@ function registerInitDetectTool(server: McpServer, service: AegisService, surfac
   server.tool(
     'aegis_init_detect',
     'Analyze a project and generate an initialization preview. Does not modify Canonical.',
-    {
-      project_root: z.string().describe('Absolute path to the project root directory'),
-      skip_template: z
-        .boolean()
-        .optional()
-        .describe('Skip template detection and create an empty knowledge base. Use aegis_import_doc to add documents.'),
-    },
+    initDetectInputShape,
     async (params) => {
       const preview = service.initDetect(params.project_root, surface, {
         skip_template: params.skip_template,
@@ -368,22 +365,6 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     );
 
     server.tool(
-      'aegis_approve_proposal',
-      'Approve a pending proposal, applying it to Canonical Knowledge.',
-      {
-        proposal_id: z.string().describe('The proposal ID to approve'),
-        modifications: z
-          .record(z.string(), z.unknown())
-          .optional()
-          .describe('Optional modifications to the proposal payload before approval'),
-      },
-      async (params) => {
-        const result = service.approveProposal(params.proposal_id, params.modifications, surface);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      },
-    );
-
-    server.tool(
       'aegis_archive_observations',
       'Archive observations older than the specified number of days (default: 90).',
       {
@@ -465,11 +446,19 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
 
   if (surface === 'admin') {
     server.tool(
+      'aegis_approve_proposal',
+      'Approve a pending proposal, applying it to Canonical Knowledge.',
+      approveProposalInputShape,
+      async (params) => {
+        const result = service.approveProposal(params.proposal_id, params.modifications, surface);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      },
+    );
+
+    server.tool(
       'aegis_preflight_proposal_bundle',
       'Dry-run all pending proposals sharing a bundle_id: validates ordering and mutations; rolls back (no Canonical change).',
-      {
-        bundle_id: z.string().describe('The bundle_id shared by pending proposals'),
-      },
+      proposalBundleInputShape,
       async (params) => {
         const result = service.preflightProposalBundle(params.bundle_id, surface);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -479,9 +468,7 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     server.tool(
       'aegis_approve_proposal_bundle',
       'Approve every pending proposal in the bundle in one transaction (one knowledge_version / one snapshot). All-or-nothing.',
-      {
-        bundle_id: z.string().describe('The bundle_id shared by pending proposals'),
-      },
+      proposalBundleInputShape,
       async (params) => {
         const result = service.approveProposalBundle(params.bundle_id, surface);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -491,10 +478,7 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     server.tool(
       'aegis_reject_proposal',
       'Reject a pending proposal with a reason.',
-      {
-        proposal_id: z.string().describe('The proposal ID to reject'),
-        reason: z.string().describe('Reason for rejection'),
-      },
+      rejectProposalInputShape,
       async (params) => {
         const result = service.rejectProposal(params.proposal_id, params.reason, surface);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -504,9 +488,7 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     server.tool(
       'aegis_init_confirm',
       'Confirm initialization using a preview hash from init_detect.',
-      {
-        preview_hash: z.string().describe('The preview_hash from a prior init_detect call'),
-      },
+      initConfirmInputShape,
       async (params) => {
         const result = service.initConfirm(params.preview_hash, surface);
         const hint =
@@ -538,7 +520,7 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     server.tool(
       'aegis_apply_upgrade',
       'Generate proposals for template upgrade changes. Proposals must still be approved.',
-      {},
+      applyUpgradeInputShape,
       async () => {
         const result = service.applyUpgrade(surface);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
@@ -548,41 +530,7 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     server.tool(
       'aegis_import_doc',
       'Import an existing document into Canonical Knowledge. Creates a document_import observation and generates new_doc/add_edge proposals. Provide content directly or file_path to read from disk.',
-      {
-        content: z
-          .string()
-          .optional()
-          .describe('Document content (Markdown body). Either content or file_path is required.'),
-        file_path: z
-          .string()
-          .optional()
-          .describe('Absolute path to a file to read as document content. Takes priority over content.'),
-        doc_id: z.string().describe('Document ID (lowercase alphanumeric, hyphens, underscores)'),
-        title: z.string().describe('Document title'),
-        kind: z.enum(['guideline', 'pattern', 'constraint', 'template', 'reference']).describe('Document kind'),
-        edge_hints: z
-          .array(
-            z.object({
-              source_type: z.enum(['path', 'layer', 'command', 'doc']),
-              source_value: z.string(),
-              edge_type: z.enum(['path_requires', 'layer_requires', 'command_requires', 'doc_depends_on']),
-              priority: z.number().int().optional(),
-            }),
-          )
-          .optional()
-          .describe('DAG edge hints for connecting the document'),
-        tags: z.array(z.string()).optional().describe('Tags for tag_mappings (applied on approve)'),
-        source_path: z
-          .string()
-          .optional()
-          .describe('Original file path (provenance metadata). Auto-set from file_path if not provided.'),
-        source_refs: z
-          .array(sourceRefSchema)
-          .optional()
-          .describe(
-            'ADR-015 §015-10: repo asset references for N:M mapping (stored as documents.source_refs_json on approve).',
-          ),
-      },
+      importDocInputShape,
       async (params) => {
         try {
           const result = await service.importDoc(params, surface);
@@ -624,18 +572,7 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     server.tool(
       'aegis_analyze_import_batch',
       'ADR-015: batch import analysis — one ImportPlan per item plus cross_doc_overlap between sources.',
-      {
-        items: z
-          .array(
-            z.object({
-              content: z.string().optional(),
-              file_path: z.string().optional(),
-              source_label: z.string().nullable().optional(),
-              source_refs: z.array(sourceRefSchema).optional(),
-            }),
-          )
-          .describe('Non-empty list of documents to analyze (each needs content or file_path).'),
-      },
+      analyzeImportBatchInputShape,
       async (params) => {
         try {
           const result = service.analyzeImportBatch(params, surface);
@@ -651,17 +588,7 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
       'ADR-015: create document_import-backed proposals sharing one bundle_id (use preflight/approve_proposal_bundle). Pass import_plan or batch_plan JSON from analyze_doc / analyze_import_batch. ' +
         'When resolved_source_path is set from file_path, source_path anchors are attached only if there is exactly one suggested unit whose slice matches the whole file after normalization — ' +
         'otherwise derived/split sections stay standalone; when anchored, stored document content is read from disk so sync_docs hashing matches.',
-      {
-        import_plan: z
-          .record(z.string(), z.unknown())
-          .optional()
-          .describe('Single-document ImportPlan object (mutually exclusive with batch_plan).'),
-        batch_plan: z
-          .record(z.string(), z.unknown())
-          .optional()
-          .describe('BatchImportPlan object from analyze_import_batch.'),
-        bundle_id: z.string().optional().describe('Optional bundle id (UUID generated when omitted).'),
-      },
+      executeImportPlanInputShape,
       async (params) => {
         try {
           const result = service.executeImportPlan(params, surface);

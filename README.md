@@ -31,7 +31,7 @@ Aegis provides three MCP surfaces — agent and admin are required; ssa is optio
 | Surface | Role | Tools |
 |---------|------|-------|
 | **agent** | Context compilation, observation recording, and related reads — no Canonical mutations | 6 tools (compile, observe, audit, known_tags, workspace_status, detect) |
-| **ssa** (optional) | For speck-serena-aegis operations: sync docs, process/archive observations, list/get/approve proposals, stats — no import, template upgrade, reject, or bundle approval | 13 tools (6 shared + 7) |
+| **ssa** (optional) | For speck-serena-aegis operations: sync docs, process/archive observations, list/get proposals, stats — no import, template upgrade, approval, reject, or bundle approval | 12 tools (6 shared + 6) |
 | **admin** | Initialization, approval, triage | 24 tools (6 shared + 18 admin-only) |
 
 > The agent surface alone cannot initialize a project or approve proposals. This separation ensures AI agents cannot modify architecture rules without human approval. ([INV-6](docs/technical-guide.md))
@@ -281,7 +281,7 @@ In addition to the DB-native workflow above (observe → propose → approve), A
 
 | Lane | Entry point | Approval mechanism | Best for |
 |------|------------|-------------------|----------|
-| **DB-native** | Agent observes gap → `aegis_observe` → `aegis_approve_proposal` | Human approves proposal in admin surface | Reactive knowledge improvement driven by agent observations |
+| **DB-native** | Agent observes gap → `aegis_observe` → `aegis_approve_proposal` | Human approves proposal in admin surface or with the CLI `approve-proposal` | Reactive knowledge improvement driven by agent observations |
 | **Source-native** | Human edits `aegis-share/source/` → PR → merge → `share-materialize` | PR merge = approval | Proactive collaborative editing with Git-based code review |
 
 Both lanes coexist. Use whichever fits the situation — or both.
@@ -383,15 +383,14 @@ You can also pass a HuggingFace URI directly: `--model hf:user/repo:file.gguf`
 | `aegis_workspace_status` | Read-only workspace snapshot: recent compile regions, unresolved compile_miss backlog, pending proposal count, reconcile backlog (hash-sync/anchor-sync/semantic-review) |
 | `aegis_init_detect` | Analyze a project to generate initialization preview |
 
-### MCP Tools — SSA Surface (additional 7 tools, 13 total)
+### MCP Tools — SSA Surface (additional 6 tools, 12 total)
 
-Optional surface for speck-serena-aegis (ssa) operations. Registers the 6 agent tools plus the following 7 tools, which behave exactly as on the admin surface. See [ADR-020](docs/adr/020-ssa-surface.md).
+Optional surface for speck-serena-aegis (ssa) operations. Registers the 6 agent tools plus the following 6 tools, which behave exactly as on the admin surface. Approval is not available on ssa; approve with the CLI `approve-proposal` or on the admin surface. See [ADR-020](docs/adr/020-ssa-surface.md).
 
 | Tool | Description |
 |------|-------------|
 | `aegis_list_proposals` | List proposals with optional status filter |
 | `aegis_get_proposal` | Get full proposal details with evidence |
-| `aegis_approve_proposal` | Approve a pending proposal |
 | `aegis_archive_observations` | Archive old observations |
 | `aegis_get_stats` | Aggregate knowledge counts and health signals |
 | `aegis_process_observations` | Trigger observation analysis pipeline for pending observations |
@@ -428,6 +427,15 @@ Optional surface for speck-serena-aegis (ssa) operations. Registers the 6 agent 
 | `maintenance` | Run observation processing, doc sync, archive, and upgrade check |
 | `approve-pending` | Approve all pending proposals in one run (`--types <t1,t2,...>` limits proposal types, `--dry-run` lists what would be approved without changing the DB). Admin-only: not exposed over MCP (INV-6) |
 | `staleness-ack` | Acknowledge reviewed Level-3 staleness (`--doc-ids <id1,id2,...>` or `--all`, `--dry-run` reports only): re-capture the documents' baselines from the current files and archive their Level-3 `staleness_detected` observations. Admin-only: not exposed over MCP (INV-6) |
+| `import-doc` | Runs `aegis_import_doc`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `analyze-import-batch` | Runs `aegis_analyze_import_batch`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `execute-import-plan` | Runs `aegis_execute_import_plan`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `init-confirm` | Runs `aegis_init_detect` and then `aegis_init_confirm` in one run (pass the `preview_hash` from `aegis_init_detect`; creates the DB if it does not exist). Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `apply-upgrade` | Runs `aegis_apply_upgrade`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `reject-proposal` | Runs `aegis_reject_proposal`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `preflight-proposal-bundle` | Runs `aegis_preflight_proposal_bundle`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `approve-proposal-bundle` | Runs `aegis_approve_proposal_bundle`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
+| `approve-proposal` | Runs `aegis_approve_proposal`. Takes the same JSON as the MCP tool via `--input <path>` or `--input -` (stdin). Admin-only: not exposed on the agent or ssa MCP surfaces |
 | `edges` | Print the approved edges as JSON, each with its target document's `source_path` (`--json` is required). Read-only: writes nothing to the DB and takes no lock |
 | `resolve` | For each path, print the documents that the `aegis_compile_context` base would deliver and the resolution path that matched, as JSON. Read-only |
 | `stats` | JSON output of knowledge counts, usage, health, and project share status |
@@ -449,6 +457,9 @@ npx @fuwasegu/aegis maintenance --dry-run                   # Report only (no wr
 npx @fuwasegu/aegis approve-pending --dry-run               # List pending proposals that would be approved
 npx @fuwasegu/aegis approve-pending --types new_doc,add_edge  # Approve only these proposal types
 npx @fuwasegu/aegis staleness-ack --doc-ids plan,spec       # Accept reviewed code drift for these documents
+echo '{"proposal_id":"p-123"}' | npx @fuwasegu/aegis approve-proposal --input -   # Approve one proposal
+echo '{"proposal_id":"p-456","modifications":{"source_value":"src/core/**"}}' | npx @fuwasegu/aegis approve-proposal --input -   # Approve with modifications
+echo '{"preview_hash":"<hash>","skip_template":true}' | npx @fuwasegu/aegis init-confirm --input - --project-root /path/to/project   # Confirm initialization
 npx @fuwasegu/aegis edges --json                            # Print the approved edges as JSON (read-only)
 npx @fuwasegu/aegis resolve src/main.ts docs/spec.md        # Documents delivered per path, with the matching edges
 npx @fuwasegu/aegis resolve -- -odd-name.ts                 # Pass a file name starting with "-" after "--"
@@ -467,6 +478,8 @@ npx @fuwasegu/aegis --list-models                           # List available SLM
 `approve-pending` prints one JSON document (`approved`, `would_approve`, `rejected`, `would_reject`, `skipped`, `failed`) to stdout and diagnostics to stderr. Proposals that belong to a bundle (`bundle_id`) are skipped (`reason: bundled`); approve those with `aegis_approve_proposal_bundle`. When a document (`doc_id`) has several pending `update_doc` proposals, only the newest one (latest `created_at`) is a candidate; the older ones are rejected with `reason: superseded`. The newest one is also rejected, with `reason: stale_content`, when its content does not match the current source file (`source_path`); a document without a source file is approved without the comparison. Rejected proposals are listed in `rejected` (`would_reject` with `--dry-run`), and their evidence observations are not queued for re-analysis. Bundled `update_doc` proposals are not part of this selection. Proposals that are no longer pending (for example, approved by another process first) are also skipped (`reason: no_longer_pending`) and do not count as failures. Exit codes: `0` on completion, `1` if any approval failed (approvals that succeeded stay applied; the JSON on stdout is still written in full), `2` on a usage error or when the database cannot be opened.
 
 `staleness-ack` prints one JSON document (`dry_run`, `acknowledged` with Level-3 finding counts per kind and the new baseline's path count, `skipped` with `reason: no_linked_paths | source_unreadable`, `archived_observations`) to stdout. Run it after you have confirmed that the documents still describe the drifted code (or have updated them): `maintenance` refreshes a baseline only on a run with no drift, so reported drift otherwise stays reported. Levels 1–2 (document vs. its source file) are not affected; `sync_docs` resolves them. An unknown or non-approved `doc_id` is an error before any write. Exit codes: `0` on completion, `2` on a usage error, an unknown `doc_id`, or when the database cannot be opened.
+
+The admin operation subcommands (`import-doc`, `analyze-import-batch`, `execute-import-plan`, `init-confirm`, `apply-upgrade`, `reject-proposal`, `preflight-proposal-bundle`, `approve-proposal-bundle`, `approve-proposal`) print one JSON document to stdout, with the same content as the corresponding admin MCP tool. Exit codes: `0` on completion, `1` only when `preflight-proposal-bundle` returns `ok: false`, `2` on a usage error, when the database does not exist, or when the operation fails. An unknown top-level key in the input is a usage error. For `init-confirm`, pass the `preview_hash` from `aegis_init_detect`; if the database does not exist, it is created.
 
 `edges` prints one JSON document to stdout; its top-level keys are `schema_version`, `knowledge_version`, and `edges`. `edges` lists every approved (`status = 'approved'`) edge, each with its target document's `source_path` (`null` if it has none), sorted ascending by `edge_type`, `source_value`, `target_doc_id`, `edge_id` (UTF-8 byte order), so the same DB content always yields the same output. `--json` is required; omitting it is a usage error. It is read-only: it writes nothing to the DB and takes no lock (`<db>.lock`). Exit codes: `0` on completion, `2` on a usage error, a missing DB file, or an exception (`1` is never used). See "edges and resolve output" in `docs/spec.md` for details.
 

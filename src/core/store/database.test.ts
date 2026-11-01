@@ -1,10 +1,19 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ContextCompiler } from '../read/compiler.js';
-import { createDatabase, openDatabaseSnapshot } from './database.js';
+import { createDatabase, ensureDatabaseDirectory, openDatabaseSnapshot } from './database.js';
 import { Repository } from './repository.js';
 
 function hash(content: string): string {
@@ -526,5 +535,36 @@ describe('openDatabaseSnapshot (read-only)', () => {
 
     expect(Date.now() - t0).toBeLessThan(1000);
     expect(existsSync(`${dbPath}.lock`)).toBe(true);
+  });
+});
+
+describe('ensureDatabaseDirectory', () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'aegis-ensure-dir-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it('creates the nested parent directory and a .gitignore containing "*"', () => {
+    const dbFile = join(tmp, 'a', 'b', 'aegis.db');
+
+    ensureDatabaseDirectory(dbFile);
+
+    expect(existsSync(join(tmp, 'a', 'b'))).toBe(true);
+    expect(readFileSync(join(tmp, 'a', 'b', '.gitignore'), 'utf-8')).toBe('*\n');
+    expect(existsSync(dbFile)).toBe(false);
+  });
+
+  it('keeps an existing .gitignore unchanged', () => {
+    mkdirSync(join(tmp, 'd'), { recursive: true });
+    writeFileSync(join(tmp, 'd', '.gitignore'), 'keep\n');
+
+    ensureDatabaseDirectory(join(tmp, 'd', 'aegis.db'));
+
+    expect(readFileSync(join(tmp, 'd', '.gitignore'), 'utf-8')).toBe('keep\n');
   });
 });

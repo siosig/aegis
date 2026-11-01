@@ -5,7 +5,7 @@
  *
  * MCP server mode:
  *   npx aegis --surface agent                    # Agent surface (default)
- *   npx aegis --surface ssa                      # SSA surface (agent + sync/process/archive observations, proposals list/get/approve, stats)
+ *   npx aegis --surface ssa                      # SSA surface (agent + sync/process/archive observations, proposals list/get, stats; no approval)
  *   npx aegis --surface admin                    # Admin surface
  *   npx aegis --slm                              # Enable SLM for expanded context (opt-in)
  *   npx aegis --slm --model qwen3.5-9b           # Select SLM model from catalog
@@ -43,6 +43,15 @@
  *   npx aegis share-materialize --source-dir /p  # Custom source directory
  *   npx aegis share-source-export                # Export DB to aegis-share/source/
  *   npx aegis share-source-export --out /path    # Custom output directory
+ *   npx aegis import-doc --input doc.json          # Admin CLI: same JSON input as aegis_import_doc; prints JSON
+ *   npx aegis analyze-import-batch --input -       # Admin CLI: aegis_analyze_import_batch (JSON from stdin)
+ *   npx aegis execute-import-plan --input plan.json # Admin CLI: aegis_execute_import_plan
+ *   npx aegis init-confirm --input -               # Admin CLI: re-runs init_detect, confirms when preview_hash matches (creates the DB)
+ *   npx aegis apply-upgrade                        # Admin CLI: aegis_apply_upgrade (no input)
+ *   npx aegis reject-proposal --input -            # Admin CLI: aegis_reject_proposal
+ *   npx aegis preflight-proposal-bundle --input -  # Admin CLI: exits 1 when ok is false
+ *   npx aegis approve-proposal-bundle --input -    # Admin CLI: aegis_approve_proposal_bundle
+ *   npx aegis approve-proposal --input -           # Admin CLI: approve one proposal (proposal_id, modifications)
  *   npx aegis --list-models                      # List available SLM models
  *
  * SLM is disabled by default (ADR-004). Enable with --slm for expanded context.
@@ -51,7 +60,7 @@
  * Without --db, a project with neither a CLAUDE.md line containing "aegis: 導入済み" nor .aegis/ starts in dormant mode (in-memory DB, 2 tools).
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -59,6 +68,7 @@ import { fileURLToPath } from 'node:url';
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { createProcessAdminCliIo, isAdminCliSubcommand, runAdminCli } from './cli/admin-commands.js';
 import { createProcessCliIo, runEdgesCli, runResolveCli } from './cli/read-commands.js';
 import { parseProposalTypesOption } from './core/automation/approve-pending.js';
 import { DEFAULT_DB_DIR, formatDormantStartupMessage, resolveServerStartupMode } from './core/init/install-marker.js';
@@ -70,7 +80,7 @@ import {
   shareMaterialize,
   shareSourceExport,
 } from './core/project-share/index.js';
-import { createDatabase, createInMemoryDatabase } from './core/store/database.js';
+import { createDatabase, createInMemoryDatabase, ensureDatabaseDirectory } from './core/store/database.js';
 import { runInitialBaselineSourcePathMigration } from './core/store/migrations/index.js';
 import { Repository } from './core/store/repository.js';
 import type { IntentTagger } from './core/tagging/tagger.js';
@@ -1177,6 +1187,17 @@ async function main() {
     return;
   }
 
+  if (isAdminCliSubcommand(subcommand)) {
+    process.exitCode = await runAdminCli(
+      subcommand,
+      process.argv.slice(3),
+      createProcessAdminCliIo(),
+      process.cwd(),
+      join(SCRIPT_DIR, '../templates'),
+    );
+    return;
+  }
+
   const cliArgs = parseArgs();
 
   if (cliArgs.listModels) {
@@ -1195,12 +1216,7 @@ async function main() {
     db = await createInMemoryDatabase();
   } else {
     // Ensure DB directory exists, with self-contained .gitignore
-    const dbDir = join(dbPath, '..');
-    mkdirSync(dbDir, { recursive: true });
-    const gitignorePath = join(dbDir, '.gitignore');
-    if (!existsSync(gitignorePath)) {
-      writeFileSync(gitignorePath, '*\n');
-    }
+    ensureDatabaseDirectory(dbPath);
     db = await createDatabase(dbPath);
   }
   const repo = new Repository(db);

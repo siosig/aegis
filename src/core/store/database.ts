@@ -12,6 +12,7 @@ import {
   constants,
   existsSync,
   fstatSync,
+  mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
@@ -584,6 +585,19 @@ function applySchemaAndMigrations(wrapper: AegisDatabase): boolean {
     changed = true;
   }
   return changed;
+}
+
+/**
+ * DB ファイルの親ディレクトリを（無ければ）再帰的に作り、そこに中身 '*\n' の .gitignore が無ければ作る。
+ * MCP サーバーの起動時（待機モード以外）と CLI の init-confirm が共有する。
+ */
+export function ensureDatabaseDirectory(dbPath: string): void {
+  const dbDir = dirname(dbPath);
+  mkdirSync(dbDir, { recursive: true });
+  const gitignorePath = join(dbDir, '.gitignore');
+  if (!existsSync(gitignorePath)) {
+    writeFileSync(gitignorePath, '*\n');
+  }
 }
 
 export async function createDatabase(dbPath: string): Promise<AegisDatabase> {

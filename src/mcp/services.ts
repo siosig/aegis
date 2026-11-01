@@ -133,11 +133,10 @@ export type SurfaceGatedOperation =
   | 'aegis_sync_docs'
   | 'aegis_process_observations';
 
-/** ssa サーフェスで許す操作。ssa の 7 本のツールと、それらが内部で呼ぶ analyzeAndPropose（ADR-020）。 */
+/** ssa サーフェスで許す操作。ssa の 6 本のツールと、それらが内部で呼ぶ analyzeAndPropose（ADR-020）。承認は含めない（改修 5）。 */
 export const SSA_ALLOWED_OPERATIONS: ReadonlySet<SurfaceGatedOperation> = new Set<SurfaceGatedOperation>([
   'aegis_list_proposals',
   'aegis_get_proposal',
-  'aegis_approve_proposal',
   'aegis_archive_observations',
   'aegis_get_stats',
   'aegis_sync_docs',

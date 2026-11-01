@@ -1,16 +1,16 @@
 ---
 description: "aegis（このフォーク）の現行の外部仕様（MCP サーバーの起動引数、DB の場所と待機モード、サーフェスごとのツール、aegis_compile_context の入出力、CLI のサブコマンドと終了コード、環境変数、永続ファイル、フォーク固有の振る舞い）。ツールや CLI の挙動を変える・呼び出し方を確かめる・既定値を調べるときに読む。"
 updated: 2026-11-01
-keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, edges, resolve, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, dormant, 待機モード, CLAUDE.md, AEGIS_SNAPSHOT_RETENTION]
+keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, edges, resolve, import-doc, init-confirm, approve-proposal, admin CLI, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, dormant, 待機モード, CLAUDE.md, AEGIS_SNAPSHOT_RETENTION]
 ---
 # aegis 仕様
 
 ## 概要（簡潔に）
 
 - aegis は、編集対象のファイルパスから DAG（パスと文書を結ぶエッジ）をたどり、AI エージェントに渡す文書の集合を決定的に返す MCP サーバー（stdio）である。パッケージは `@fuwasegu/aegis` 版 1.1.0、入口は `dist/main.js`、Node.js 26 以上を要する。
-- MCP のツールは 3 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`ssa` サーフェスは agent の 6 ツールに 7 ツールを足した 13 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する（`agent` ⊂ `ssa` ⊂ `admin`）。ただし、プロジェクトに導入の目印が無く `--db` も無いときは待機モードで起動し、サーフェスによらず 2 ツール（`aegis_init_detect`・`aegis_workspace_status`）だけを登録する。
+- MCP のツールは 3 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`ssa` サーフェスは agent の 6 ツールに 6 ツールを足した 12 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する（`agent` ⊂ `ssa` ⊂ `admin`）。ただし、プロジェクトに導入の目印が無く `--db` も無いときは待機モードで起動し、サーフェスによらず 2 ツール（`aegis_init_detect`・`aegis_workspace_status`）だけを登録する。
 - 知識の正本（Canonical Knowledge）は SQLite の DB にある。MCP サーバーは、`--db` を明示したとき、または導入の目印（プロジェクトルートの `CLAUDE.md` の `aegis: 導入済み` を含む行、または `.aegis`）があるときだけ DB ファイルを開く・作る。どちらでもなければ待機モードで動き、空のインメモリ DB を使い、ファイルを作らず、「未導入」を stderr と `aegis_workspace_status` の応答で知らせる。
-- 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`edges`・`resolve`・`stats`・`doctor`・`share-*` の 6 種）。
+- 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`edges`・`resolve`・`stats`・`doctor`・`share-*`、および admin の操作の `import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）。
 - 内部設計と「元に戻してはいけない判断」の理由は `docs/plan.md` に置く。本書は外から観測できる振る舞いだけを書く。
 
 ## MCP サーバーの起動引数
@@ -65,7 +65,7 @@ MCP サーバーは、起動時に 1 回だけ、次の順でモードと DB を
 
 ## サーフェスとツール一覧
 
-`agent` の 6 ツールは 3 つのサーフェスすべてに登録する。`aegis_list_proposals`・`aegis_get_proposal`・`aegis_approve_proposal`・`aegis_archive_observations`・`aegis_get_stats`・`aegis_process_observations`・`aegis_sync_docs` の 7 ツールは `ssa` と `admin` に、残りの管理用の 11 ツールは `admin` にだけ登録する。サービス層でも、`agent` はすべての管理用の操作を、`ssa` は `SSA_ALLOWED_OPERATIONS`（上の 7 ツールが使う操作と、それらが内部で呼ぶ `analyzeAndPropose`）以外の操作を `SurfaceViolationError` で拒否する（ADR-020）。
+`agent` の 6 ツールは 3 つのサーフェスすべてに登録する。`aegis_list_proposals`・`aegis_get_proposal`・`aegis_archive_observations`・`aegis_get_stats`・`aegis_process_observations`・`aegis_sync_docs` の 6 ツールは `ssa` と `admin` に、`aegis_approve_proposal` を含む残りの管理用の 12 ツールは `admin` にだけ登録する。`ssa` から提案は承認できないので、承認は CLI の `approve-proposal` か `admin` で行う。サービス層でも、`agent` はすべての管理用の操作を、`ssa` は `SSA_ALLOWED_OPERATIONS`（上の 6 ツールが使う操作と、それらが内部で呼ぶ `analyzeAndPropose`）以外の操作を `SurfaceViolationError` で拒否する（ADR-020）。
 
 待機モードでは、サーフェスによらず `aegis_init_detect`・`aegis_workspace_status` の 2 ツールだけを登録し、resource も出さない。待機モードの `aegis_workspace_status` は、`content[0]` に次の 1 文を、`content[1]` に JSON を返す。
 
@@ -84,7 +84,7 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 | `aegis_init_confirm` | admin | `preview_hash` | プレビューを確定して Canonical を初期化する。プレビューはプロセス内にだけ保持するので、`aegis_init_detect` と同じ admin プロセスで呼ぶ。アダプタは配らず、`deploy-adapters` の実行を案内する文を返す |
 | `aegis_list_proposals` | admin・ssa | `status`、`limit`（最大 100、既定 20）、`offset` | 提案の一覧 |
 | `aegis_get_proposal` | admin・ssa | `proposal_id` | 提案 1 件と根拠の Observation |
-| `aegis_approve_proposal` | admin・ssa | `proposal_id`、`modifications` | 提案を承認して Canonical に反映する |
+| `aegis_approve_proposal` | admin | `proposal_id`、`modifications` | 提案を承認して Canonical に反映する |
 | `aegis_reject_proposal` | admin | `proposal_id`、`reason` | 提案を却下し、根拠の Observation を再分析できる状態に戻す |
 | `aegis_preflight_proposal_bundle` | admin | `bundle_id` | 同じ `bundle_id` の pending 提案をまとめて承認できるかを、書き込まずに確かめる |
 | `aegis_approve_proposal_bundle` | admin | `bundle_id` | 同じ `bundle_id` の pending 提案を 1 トランザクションで全部承認する（全部か無しか） |
@@ -214,6 +214,15 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 | `maintenance` | `--dry-run`、`--days <N>`（既定 90）、`--project-root`、`--db`、`--templates`、`--template-dir` | Observation の分析、文書の同期、アーカイブ、テンプレートの更新確認、co-change のキャッシュ、staleness の検査、DB の圧縮を順に行い、6 つの節の要約を出す。DB ファイルが無い・`--days` が正の整数でなければ 1。`--dry-run` でなく、Observation の分析に失敗が 1 件でもあれば 1。それ以外は 0 |
 | `approve-pending` | `--dry-run`、`--types <t1,t2>`、`--project-root`、`--db`、`--templates`、`--template-dir` | pending の提案を一括で承認する（「フォーク固有の振る舞い」の節）。stdout に JSON 1 つ、stderr に要約 1 行。完了で 0、承認の失敗を含むと 1、引数の誤り・DB ファイルが無い・例外は 2 |
 | `staleness-ack` | `--doc-ids <a,b>` か `--all`（どちらか 1 つが必須）、`--dry-run`、`--project-root`、`--db`、`--templates`、`--template-dir` | 文書の Level 3 の基準値を現在のファイルから取り直し、その文書の Level 3 の `staleness_detected` をアーカイブする。stdout に JSON 1 つ。完了で 0、引数の誤り・未知または未承認の `doc_id`・DB ファイルが無い・例外は 2 |
+| `import-doc` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_import_doc` を実行する。文書を取り込み、提案を作る。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
+| `analyze-import-batch` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_analyze_import_batch` を実行する。取り込み計画を分析する（読み取り専用）。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
+| `execute-import-plan` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_execute_import_plan` を実行する。分析した取り込み計画を提案のバンドルにする。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
+| `init-confirm` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_init_confirm` を実行する（事前に `aegis_init_detect` と同じ検出を行う）。DB ファイルが無ければ作る。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・`preview_hash` の不一致などの事前の検出の不合格・サービス層の例外は 2 |
+| `apply-upgrade` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_apply_upgrade` を実行する。テンプレートの更新の提案を作る。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
+| `reject-proposal` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_reject_proposal` を実行する。提案を却下する。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
+| `preflight-proposal-bundle` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_preflight_proposal_bundle` を実行する。バンドルの承認前の検査（読み取り専用）。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、`ok` が `false` なら 1。引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
+| `approve-proposal-bundle` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_approve_proposal_bundle` を実行する。バンドルを承認する。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
+| `approve-proposal` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_approve_proposal` を実行する。提案を 1 件承認する。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
 | `edges` | `--json`（必須）、`--project-root`、`--db` | 承認済みのエッジの全件を、対象文書の `source_path` 付きで JSON 1 つにして stdout に出す（出力は「edges と resolve の出力」の小節）。読み取り専用。完了で 0、引数の誤り・DB ファイルが無い・例外は 2 |
 | `resolve` | `<path>...`（1 つ以上）、`--json`（任意・意味なし）、`--project-root`、`--db`、`--`（これより後はすべてパス） | パスごとに `aegis_compile_context` の base が配る文書と経路を JSON 1 つにして出す。読み取り専用。終了コードは `edges` と同じ |
 | `stats` | `--project-root`、`--db`、`--templates`、`--template-dir` | 件数・利用状況・健全性・`project_share` を JSON で出す。DB ファイルが無ければ 1、それ以外は 0 |
@@ -228,7 +237,73 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 - `maintenance` の要約の節は `process_observations`・`sync_docs`（staleness の報告を含む）・`archive`・`check_upgrade`・`co_change_cache`・`db_compaction` の 6 つである。`--dry-run` では Observation の分析を飛ばし、基準値を書かず、`VACUUM` も実行しない。
 - `stats` と `doctor` は DB を開くだけで、`source_path` の正規化の移行は行わない。ただし DB を開くときにスキーマの移行が必要なら、その分は書き込む。
 - `edges` と `resolve` も `source_path` の正規化の移行を行わない（古い DB の絶対パスの `source_path` はそのまま出る）。DB とその隣のファイルに一切書かず、ロックも取らない。移行が要る古い DB でも移行はメモリ上だけで行う。
-- `approve-pending`・`staleness-ack`・`edges`・`resolve` は未知のオプションと値の無いオプションを引数の誤りとして扱う。ほかのサブコマンドは未知のオプションを無視する。`edges` と `resolve` は `--opt=value` の形も受け付け、`-` で始まる値は `--db=-foo` の形でだけ渡せる（`--db -foo` は値の無いオプションとして誤りになる）。
+- `approve-pending`・`staleness-ack`・`edges`・`resolve` と admin の操作の 9 つ（`import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）は未知のオプションと値の無いオプションを引数の誤りとして扱う。ほかのサブコマンドは未知のオプションを無視する。`edges`・`resolve` と admin の操作の 9 つは `--opt=value` の形も受け付け、`-` で始まる値は `--db=-foo` の形でだけ渡せる（`--db -foo` は値の無いオプションとして誤りになる）。
+
+### admin の操作の CLI
+
+admin だけの MCP ツール 9 本に当たるサブコマンドである。入力は MCP のツールと同じ JSON オブジェクト、出力は stdout の JSON 1 つ、失敗は終了コードで返す。CLI はサーフェスを持たず、admin の権限で動く。未知のサブコマンドは従来どおり MCP サーバーとして起動する。ssa の `bin/aegis` の許可の一覧には、この 9 つの名前を足す。
+
+#### サブコマンドと MCP ツールの対応
+
+| サブコマンド | 対応する MCP ツール | 入力の項目（MCP と同じ名前・型） |
+|---|---|---|
+| `import-doc` | `aegis_import_doc` | `doc_id`・`title`・`kind`（必須）、`content`・`file_path`・`edge_hints`・`tags`・`source_path`・`source_refs` |
+| `analyze-import-batch` | `aegis_analyze_import_batch` | `items`（必須） |
+| `execute-import-plan` | `aegis_execute_import_plan` | `import_plan`・`batch_plan`・`bundle_id` |
+| `init-confirm` | `aegis_init_detect` → `aegis_init_confirm` | `preview_hash`（必須）、`project_root`、`skip_template` |
+| `apply-upgrade` | `aegis_apply_upgrade` | なし（`{}`） |
+| `reject-proposal` | `aegis_reject_proposal` | `proposal_id`・`reason`（必須） |
+| `preflight-proposal-bundle` | `aegis_preflight_proposal_bundle` | `bundle_id`（必須） |
+| `approve-proposal-bundle` | `aegis_approve_proposal_bundle` | `bundle_id`（必須） |
+| `approve-proposal` | `aegis_approve_proposal` | `proposal_id`（必須）、`modifications` |
+
+- `--input <path>` は入力の JSON オブジェクトをファイル（カレントディレクトリ基準の相対パス可）から、`--input -` は stdin から読む。省略すると `{}` を入力とする。`-` で始まるファイル名は `--input=-name.json` の形で渡す。
+- `--project-root`（既定はカレントディレクトリ）は `source_path` の正規化の基準と `--db` の既定の場所に使う。`--db` の既定は `<project-root>/.aegis/aegis.db`。`--templates`（既定はパッケージの `templates/`）と `--template-dir`（複数回指定できる）は `aegis_init_detect` と `apply-upgrade` が使うテンプレートの置き場である。
+- MCP サーバーの起動のオプション（`--surface`・`--slm` 等）は受け付けない（未知のオプションとして誤りになる）。位置引数・空文字列の値も引数の誤りである。
+- `import-doc` の `file_path` と `analyze-import-batch` の `items[].file_path` は MCP と同じに解釈する（サービス層がそのまま読むので、絶対パスを渡す）。
+
+#### 入力の検証（admin の操作）
+
+- 入力は JSON オブジェクト 1 つでなければならない。JSON として読めない・オブジェクトでない・必須の項目が無い・型が違うときは引数の誤り（終了コード 2）で、DB を開かない。
+- 検証には MCP のツールと同じ zod のスキーマ（`src/mcp/tool-input-schemas.ts`）を使うので、既定値などの変換も MCP と同じに働く。
+- MCP との差は未知のキーの扱いだけである。最上位の未知のキーは CLI では引数の誤り（終了コード 2）で、MCP では無視される。入れ子の要素（`edge_hints`・`source_refs`・`items` の要素）の未知のキーは、どちらでも無視される。
+
+#### 出力と終了コード（admin の操作）
+
+- 成功（終了コード 0・1）では、stdout にサービス層の戻り値を `JSON.stringify(result, null, 2)` にして改行 1 つを付けて出す。内容は admin の MCP のツールが返す JSON（解析した値）と同じである。
+- `init-confirm` は、MCP の応答が JSON の後に付ける `Next: run ... deploy-adapters` の案内を出さない。初期化の後は必要に応じて `deploy-adapters` を実行する。
+- 終了コード 0 では stderr に何も出さない。失敗（終了コード 2）では stdout に何も出さず、stderr に 1 行を出す（スタックは出さない）。
+
+| 失敗 | stderr の行 |
+|---|---|
+| 引数の誤り | `[aegis] <サブコマンド>: <理由>` |
+| 入力のファイルが読めない | `[aegis] <サブコマンド>: cannot read --input <path>: <理由>` |
+| 入力が JSON でない | `[aegis] <サブコマンド>: invalid input: not valid JSON (<理由>)` |
+| 入力の検証の失敗 | `[aegis] <サブコマンド>: invalid input: <項目のパス>: <理由>; ...` |
+| DB ファイルが無い | `[aegis] Database not found at <dbPath>` |
+| サービス層の例外 | `[aegis] <サブコマンド>: <例外の message（改行は空白 1 つ）>` |
+
+| 終了コード | 条件 |
+|---|---|
+| 0 | 操作が完了した。`import-doc` の `warnings`、`execute-import-plan` の `skipped_duplicate_count`、`apply-upgrade` の空の `proposal_ids`、`analyze-import-batch` の重なりの警告があっても 0 |
+| 1 | `preflight-proposal-bundle` の結果の `ok` が `false`。stdout に JSON を出し、stderr に `[aegis] preflight-proposal-bundle: ok=false bundle_id=<id>`（`ordering_error` があれば ` ordering_error=<文>` を続ける）を出す |
+| 2 | 引数の誤り・DB ファイルが無い・サービス層の例外（存在しない・pending でない提案、バンドルの承認の失敗、`preview_hash` の不一致、初期化済み、許されない `modifications` の項目など） |
+
+- 終了は `process.exitCode` で返し、`process.exit()` を呼ばない（ADR-019 D-3）。
+
+#### DB ファイルの扱い（admin の操作）
+
+- `init-confirm` 以外は、DB ファイルが無ければ終了コード 2 で、DB もディレクトリも作らない。
+- `init-confirm` は、DB ファイルが無ければ、DB を作る前に `aegis_init_detect` と同じ検出を行い、`preview_hash` の一致と、確定を妨げる警告（`has_blocking_warnings`）が無いことを確かめる。不合格なら何も作らずに終了コード 2 を返す。合格したら DB の親ディレクトリと `.gitignore`（中身 `*`。既にあれば変えない）を作り、DB を作って確定する。
+- 書き込みは既存の DB の書き込みの規則（ロック・一時ファイルと rename による置き換え）に従う。
+- `source_path` の正規化の移行は行わない（`approve-pending`・`staleness-ack` と同じ）。
+
+#### init-confirm の手順
+
+1. `aegis_init_detect` を `{ project_root, skip_template }` で呼び、プレビューを確かめて `preview_hash` を控える（どのサーフェスでも、待機モードでも呼べる）。
+2. `init-confirm` に `{ preview_hash, project_root, skip_template }` を渡す。`project_root` を省くと `--project-root` を使う。
+3. CLI は同じ実行の中で検出をやり直し、`preview_hash` が一致したときだけ確定する。`preview_hash` は `project_root`・`skip_template`・テンプレート（`--templates`・`--template-dir`）とプロジェクトのファイルに依存するので、1 と同じ値を渡し、その間にプロジェクトを変えない。一致しなければ終了コード 2 で確定しない。
+4. 結果は `aegis_init_confirm` と同じ `{ knowledge_version, snapshot_id }` である。
 
 ### edges と resolve の出力
 
@@ -453,6 +528,7 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 |---|---|
 | `src/main.ts` | 起動引数・DB の場所と待機モードの判定（`src/core/init/install-marker.ts`）・CLI のサブコマンドと終了コード |
 | `src/cli/read-commands.ts`・`src/core/read/knowledge-query.ts` | `edges`・`resolve` の引数・出力・終了コード |
+| `src/cli/admin-commands.ts`・`src/mcp/tool-input-schemas.ts` | admin の操作の CLI の引数・入力の検証・出力・終了コード |
 | `src/core/init/install-marker.ts` | 導入済みの目印の判定・起動モード・待機モードの文言 |
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | ツールの登録・引数・サーフェスの検査・Observation の検証・エラー応答 |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts`・`src/core/types.ts` | compile の選び方・出力の形・delivery・notices |

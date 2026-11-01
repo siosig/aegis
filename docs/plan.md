@@ -1,14 +1,14 @@
 ---
-description: "aegis（このフォーク）の内部設計（モジュール構成、不変条件と強制箇所、Observation から Canonical までの流れ、sql.js の DB 層の書き込み経路、snapshot の保持、staleness の Level 1〜3 と基準値）と、ADR 001〜020 のうち元に戻してはいけない判断の理由。コードを改修する前、とくにサーフェスの境界・承認の経路・DB の書き込み・staleness・CLI と MCP の分担に触る前に読む。"
+description: "aegis（このフォーク）の内部設計（モジュール構成、不変条件と強制箇所、Observation から Canonical までの流れ、sql.js の DB 層の書き込み経路、snapshot の保持、staleness の Level 1〜3 と基準値、admin の操作の CLI）と、ADR 001〜020 のうち元に戻してはいけない判断の理由。コードを改修する前、とくにサーフェスの境界・承認の経路・DB の書き込み・staleness・CLI と MCP の分担に触る前に読む。"
 updated: 2026-11-01
-keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P-1, P-3, ADR, Do not undo, sql.js, lock, reload, persist, staleness, baseline, 基準値, approve-pending, staleness-ack, edges, resolve, routeBase, openDatabaseSnapshot, observation, proposal, snapshot, pruning, VACUUM, not installed]
+keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P-1, P-3, ADR, Do not undo, sql.js, lock, reload, persist, staleness, baseline, 基準値, approve-pending, staleness-ack, edges, resolve, admin-cli, tool-input-schemas, init-confirm, routeBase, openDatabaseSnapshot, observation, proposal, snapshot, pruning, VACUUM, not installed]
 ---
 # aegis 設計
 
 ## 概要（簡潔に）
 
 - aegis は決定的なコンテキストのコンパイラである。読み取り経路（`aegis_compile_context`）は承認済みの DAG だけを決まった順でたどり、推論を挟まない。知識の変更は「Observation（観測）→ Proposal（提案）→ 人の承認 → Canonical（正本）」の 1 本の経路だけを通る。
-- 権限はサーフェスで分ける。agent サーフェスは読むことと Observation を記録することしかできず、Canonical を変える操作は admin サーフェスと CLI にあり、ssa サーフェスは提案の 1 件ずつの承認（`aegis_approve_proposal`）だけを持つ。境界はツールの登録とサービス層の検査の 2 か所で守る。
+- 権限はサーフェスで分ける。agent サーフェスは読むことと Observation を記録することしかできず、Canonical を変える操作は admin サーフェスと CLI にあり、ssa サーフェスは提案を作れるが承認できない（承認は CLI と admin サーフェスだけ）。境界はツールの登録とサービス層の検査の 2 か所で守る。
 - DB は sql.js（WASM の SQLite）で、各プロセスが DB の全体をメモリに持つ。複数のプロセス（agent・admin・CLI）が同じファイルを使うので、書き込みは必ず「ロック → ディスクから読み直し → 変更 → 一時ファイルに書いて rename → ロック解除」の順で行う。
 - このフォークは ADR-019 で運用を軽くした。staleness の検査対象を `git ls-files` に絞り、一括承認と staleness の確定を CLI 専用で足し、snapshot を刈り込み、未導入のプロジェクトでは待機モードで起動するようにした。
 - 外から観測できる振る舞い（引数・既定値・終了コード）は `docs/spec.md` に置く。本書は内部の構造と、元に戻してはいけない判断の理由を書く。
@@ -19,9 +19,11 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 
 | パス | 役割 |
 |---|---|
-| `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け、起動モード（待機モード）による DB・サーバーの選択、MCP サーバーの起動 |
-| `src/cli/` | CLI のサブコマンドの引数の解析と実行（`read-commands.ts`: `edges`・`resolve`）。`src/core/` だけを使い、`src/mcp/` を import しない（`AegisService` を通さない） |
-| `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `ssa`・`admin` のときに ssa の 7 ツールを、`admin` のときだけ残りの管理用の 11 ツールを登録する。待機モードでは `createDormantAegisServer` が 2 本だけを登録する |
+| `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け（`edges`・`resolve` と admin の操作の CLI）、起動モード（待機モード）による DB・サーバーの選択、MCP サーバーの起動 |
+| `src/cli/read-commands.ts` | 読み取り専用の CLI のサブコマンド `edges`・`resolve` の引数の解析と実行。`src/core/` だけを使い、`src/mcp/` を import しない（`AegisService` を通さない） |
+| `src/cli/admin-commands.ts` | admin だけの MCP ツール 9 本に当たる CLI のサブコマンドの引数の解析と実行（`import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）。`AegisService` を `'admin'` で呼ぶので `src/mcp/` を import する |
+| `src/mcp/tool-input-schemas.ts` | admin だけの 9 ツールの zod の入力スキーマ。`server.ts` と `src/cli/admin-commands.ts` が共有する |
+| `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `ssa`・`admin` のときに ssa の 6 ツールを、`admin` のときだけ残りの管理用の 12 ツールを登録する。待機モードでは `createDormantAegisServer` が 2 本だけを登録する |
 | `src/mcp/services.ts` | サービスの窓口（`AegisService`）。管理用の操作は先頭で `assertSurfaceAllows` を呼ぶ（判定は `isOperationAllowedOnSurface`、ssa の許可リストは `SSA_ALLOWED_OPERATIONS`）。Observation の検証、分析器の登録表、`maintenance`、アダプタの配布もここ |
 | `src/mcp/tool-error.ts` | ツールのエラー応答に原因を必ず含める補助 |
 | `src/core/read/` | `compiler.ts`（DAG のたどり方・notices）、`allocator.ts`（delivery の割り当て）、`workspace-status.ts`、`knowledge-query.ts`（`edges`・`resolve` の出力の組み立て。base の照合は `compiler.ts` の `routeBase` を compile と共有する） |
@@ -47,9 +49,9 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 | INV-3 snapshot の不変性（緩和済み） | 残した世代の行は変えない。保持外の世代の内容行は刈り込みうる（ADR-019 D-4） | `snapshot-pruning.ts` |
 | INV-4 版の単調増加 | 承認ごとに `knowledge_version` を 1 増やし、snapshot を作る | `_approveProposalInTransaction` |
 | INV-5 監査 | compile の結果は `compile_id` と `snapshot_id` を持ち、`compile_miss` は両方を参照する | `compiler.ts`、`validateObserveEvent` |
-| INV-6 権限分離 | agent サーフェスから Canonical を変えられない | `server.ts` の `if (surface === 'ssa' \|\| surface === 'admin')`（ssa の 7 ツール）と `if (surface === 'admin')`（admin だけの 11 ツール）による登録の分岐と、`services.ts` の `assertSurfaceAllows`（許可リスト `SSA_ALLOWED_OPERATIONS`、拒否は `SurfaceViolationError`）の 2 か所 |
+| INV-6 権限分離 | agent サーフェスから Canonical を変えられない | `server.ts` の `if (surface === 'ssa' \|\| surface === 'admin')`（ssa の 6 ツール）と `if (surface === 'admin')`（admin だけの 12 ツール）による登録の分岐と、`services.ts` の `assertSurfaceAllows`（許可リスト `SSA_ALLOWED_OPERATIONS`、拒否は `SurfaceViolationError`）の 2 か所 |
 
-- INV-6 の原文は「Canonical を変えられるのは `approve_proposal` と `init_confirm` だけ」と書くが、現行ではバンドルの承認、`approve-pending`、`share-materialize`、`share-hydrate` も Canonical を変える。いずれも admin サーフェスか CLI にあり、agent・ssa サーフェスには無い。ssa から Canonical を変える経路は `aegis_approve_proposal`（1 件ずつ）だけである（ADR-020）。
+- INV-6 の原文は「Canonical を変えられるのは `approve_proposal` と `init_confirm` だけ」と書くが、現行ではバンドルの承認、`approve-pending`、`share-materialize`、`share-hydrate` も Canonical を変える。いずれも admin サーフェスか CLI にあり、agent・ssa サーフェスには無い。ssa から Canonical を変える経路は無い（ADR-020 の追記）。
 - agent の操作（`compileContext`・`observe` など）はサーフェスを検査しない。agent の操作が書くのは `compile_log` と `observations` だけで、Canonical に触れないからである。
 
 ## Observation から Canonical までの流れ
@@ -143,6 +145,19 @@ sequenceDiagram
 - 理由: 通常の `createDatabase` はロックを取り、移行があればファイルへ書き戻す。読むだけの CLI が他のプロセスの書き込みを待ったり、ファイルを書き換えたりしないよう、`openDatabaseSnapshot` でロック無しにファイルを 1 回読み、メモリ上の複製で動かす。
 - 元に戻さないこと: `resolve` に照合を再実装しない（`routeBase` を共有する）。`edges`・`resolve` で `createDatabase` を使わない、`runInitialBaselineSourcePathMigration` を呼ばない、`compile_log` を書かない。`src/core/` から `src/cli/` を import しない。
 
+## admin の操作の CLI の設計
+
+- 判断: admin だけの MCP ツール 9 本を、ツールごとに 1 つのサブコマンドとして CLI に出す（実装は `src/cli/admin-commands.ts`）。入力は MCP と同じ JSON オブジェクトを `--input <path|->` で渡し、`AegisService` の同名の操作を `'admin'` で呼ぶ。
+- 理由: サブコマンドが 1 ツールに 1 つなので、ssa の `bin/aegis` が第 1 引数だけで許可するサブコマンドを絞れる。
+- 判断: 入力スキーマは `src/mcp/tool-input-schemas.ts` に置いて MCP の登録と共有し、CLI は最上位のキーだけ strict に検査する。入れ子の要素は MCP と同じく未知のキーを無視する。
+- 理由: `modifications` の綴りの誤りを黙って捨てないためである。MCP 側の挙動は変えない。
+- 判断: 終了コードは 0（成功）、1（`preflight-proposal-bundle` の `ok: false` だけ）、2（引数の誤り・DB ファイルが無い・サービス層の例外）とする。
+- 判断: `init-confirm` は同じ実行の中で検出をやり直し、`preview_hash` が一致したときだけ確定する。DB ファイルが無いときは、DB を作る前に事前の検出（`preview_hash` の一致と確定を妨げる警告が無いこと）に合格してから DB を作る。
+- 理由: 不合格のときに `.aegis/` を作ると、待機モードの判定（「未導入プロジェクトの待機モードの判断」の節）が失敗の副作用で変わる。
+- 判断: `source_path` の正規化の移行（`runInitialBaselineSourcePathMigration`）は行わない。`approve-pending`・`staleness-ack` と同じである。
+- 判断: `src/cli/admin-commands.ts` は `AegisService` を使うので `src/mcp/` を import する。「edges と resolve の設計」の節の `src/cli/` から `src/mcp/` を import しない規則は `src/cli/read-commands.ts` だけが対象で、この層には当てはまらない。
+- 元に戻さないこと: 承認（`aegis_approve_proposal`）を ssa の MCP に戻さない。承認を人の手元の操作（CLI と admin サーフェス）に保つための境界である（ADR-020 の追記）。
+
 ## 未導入プロジェクトの待機モードの判断
 
 - 判断: MCP サーバーは、導入済みの目印が無く `--db` も無いとき、待機モードで起動する。目印は 2 種で、`<project-root>/CLAUDE.md` に `aegis: 導入済み` を含むことと、`<project-root>/.aegis` が存在することである（`.aegis` はファイルでも存在扱い）。`--db` を明示したときは目印を判定せず、従来どおり DB を開く。待機モードはディレクトリもファイルも作らず、空のインメモリ DB で、surface によらず `aegis_init_detect`・`aegis_workspace_status` の 2 本だけを登録する（`createDormantAegisServer`）。resource も tagger も出さない。stderr の起動行と `aegis_workspace_status` の応答で未導入を知らせる。判定と文言の置き場所は `src/core/init/install-marker.ts` で、判定は起動時に 1 回だけ行う。導入は目印を置いて再起動（再接続）することである。CLI のサブコマンドの振る舞いは変えない（ADR-019 追記）。
@@ -175,7 +190,7 @@ sequenceDiagram
 | 017 | 共有バンドル（`aegis-share/`）は配布物で、実行時の正本は DB だけである。同じ snapshot から同じバイト列を出し、読み込み時はハッシュを計算し直して信用しない。書き出しと読み込みは CLI で、MCP のツールにしない。`share-hydrate` は DB の丸ごとの置き換えで、`.aegis/aegis.db` を git で管理しない |
 | 018 | 共有ソースは `aegis-share/source/` に置き、エッジは起点の種別ごとにファイルを分ける。適用の前に検査と整形を必須にする。PR のマージを承認とみなすのは共有ソースの経路だけで、DB の承認の意味に一般化しない。`compile_context` は共有ソースを読まない |
 | 019 | 「フォーク固有の判断（ADR-019）」の節 |
-| 020 | ssa サーフェスはツールの登録（13 ツール）とサービス層の許可リスト（`SSA_ALLOWED_OPERATIONS`）の 2 か所で閉じる。登録だけで絞らない。取り込み・テンプレートの更新・却下・バンドルの承認・一括承認を ssa に出さない |
+| 020 | ssa サーフェスはツールの登録（12 ツール）とサービス層の許可リスト（`SSA_ALLOWED_OPERATIONS`）の 2 か所で閉じる。登録だけで絞らない。取り込み・テンプレートの更新・承認（1 件・バンドル・一括）・却下を ssa に出さない |
 
 ### フォーク固有の判断（ADR-019）
 
@@ -216,6 +231,7 @@ sequenceDiagram
 | 資料 | 確認日 | 内容 |
 |---|---|---|
 | `src/cli/read-commands.ts`・`src/core/read/knowledge-query.ts` | 2026-11-01 | edges・resolve の解析・出力・終了コード |
+| `src/cli/admin-commands.ts`・`src/mcp/tool-input-schemas.ts` | 2026-11-01 | admin の操作の CLI のサブコマンド、入力スキーマの共有、終了コード、`init-confirm` |
 | `src/main.ts` | 2026-11-01 | 待機モードの判定、DB の選択、CLI の振り分け、`approve-pending`・`staleness-ack` の終了コード |
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | 2026-11-01 | ツールの登録の分岐、`assertSurfaceAllows`・`SSA_ALLOWED_OPERATIONS`、分析器の登録表、`analyzeAndPropose`、`runMaintenance` |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts` | 2026-11-01 | 文書の選び方と並べ方、notices、delivery の採用順 |

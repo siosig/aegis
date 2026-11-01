@@ -482,11 +482,11 @@ describe('AegisService.approvePending — INV-6', () => {
     expect(pendingIds(fx)).toEqual(['p-edge', 'p-new', 'p-update']);
   });
 
-  it('keeps the MCP tool counts at 6 (agent), 13 (ssa), and 24 (admin) with no approve_pending tool', async () => {
+  it('keeps the MCP tool counts at 6 (agent), 12 (ssa), and 24 (admin) with no approve_pending tool', async () => {
     const fx = await createFixture();
     const service = new AegisService(fx.repo, TEMPLATES_ROOT);
 
-    const counts: Record<Surface, number> = { agent: 6, ssa: 13, admin: 24 };
+    const counts: Record<Surface, number> = { agent: 6, ssa: 12, admin: 24 };
     for (const surface of SURFACES) {
       const server = createAegisServer(service, surface);
       const client = new Client({ name: `test-client-${surface}`, version: '0.0.1' });

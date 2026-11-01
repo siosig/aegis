@@ -35,7 +35,6 @@ const AGENT_TOOLS = [
 const SSA_EXTRA_TOOLS = [
   'aegis_list_proposals',
   'aegis_get_proposal',
-  'aegis_approve_proposal',
   'aegis_archive_observations',
   'aegis_get_stats',
   'aegis_process_observations',
@@ -43,6 +42,7 @@ const SSA_EXTRA_TOOLS = [
 ];
 
 const ADMIN_ONLY_TOOLS = [
+  'aegis_approve_proposal',
   'aegis_preflight_proposal_bundle',
   'aegis_approve_proposal_bundle',
   'aegis_reject_proposal',
@@ -62,7 +62,7 @@ const EXPECTED_TOOLS: Record<Surface, string[]> = {
   admin: [...AGENT_TOOLS, ...SSA_EXTRA_TOOLS, ...ADMIN_ONLY_TOOLS].sort(),
 };
 
-const EXPECTED_COUNTS: Record<Surface, number> = { agent: 6, ssa: 13, admin: 24 };
+const EXPECTED_COUNTS: Record<Surface, number> = { agent: 6, ssa: 12, admin: 24 };
 
 function hash(content: string): string {
   return createHash('sha256').update(content).digest('hex');
@@ -222,8 +222,9 @@ describe('V-2: ssa tools behave the same as admin', () => {
         name: 'aegis_approve_proposal',
         arguments: { proposal_id: 'boot-ssa' },
       });
-      expect(approve.isError).not.toBe(true);
-      expect(repo.getProposal('boot-ssa')?.status).toBe('approved');
+      expect(approve.isError).toBe(true);
+      expect(textOf(approve)).toContain('Tool aegis_approve_proposal not found');
+      expect(repo.getProposal('boot-ssa')?.status).toBe('pending');
 
       expect(ssa.client.getServerVersion()?.name).toBe('aegis-ssa');
     } finally {
@@ -252,7 +253,7 @@ describe('V-3: admin-only tools are not found on ssa', () => {
 const OPERATION_EXPECTATIONS: Record<SurfaceGatedOperation, { agent: boolean; ssa: boolean; admin: boolean }> = {
   aegis_list_proposals: { agent: false, ssa: true, admin: true },
   aegis_get_proposal: { agent: false, ssa: true, admin: true },
-  aegis_approve_proposal: { agent: false, ssa: true, admin: true },
+  aegis_approve_proposal: { agent: false, ssa: false, admin: true },
   aegis_archive_observations: { agent: false, ssa: true, admin: true },
   aegis_get_stats: { agent: false, ssa: true, admin: true },
   aegis_sync_docs: { agent: false, ssa: true, admin: true },
@@ -287,8 +288,10 @@ describe('V-4: service-layer surface gating', () => {
     }
   });
 
-  it('(b) rejects the 14 non-ssa methods on the ssa surface', async () => {
+  it('(b) rejects the 15 non-ssa methods on the ssa surface', async () => {
+    insertPendingBootstrap(repo, 'boot-v4b');
     const violation = (call: () => unknown) => expect(call).toThrow(SurfaceViolationError);
+    violation(() => service.approveProposal('boot-v4b', undefined, 'ssa'));
     violation(() => service.analyzeDoc({ content: '## A\n\nb' }, 'ssa'));
     violation(() => service.analyzeImportBatch({ items: [{ content: '## A\n\nb' }] }, 'ssa'));
     violation(() => service.executeImportPlan({ import_plan: { bad: true } }, 'ssa'));
@@ -309,14 +312,15 @@ describe('V-4: service-layer surface gating', () => {
     expect(() => service.rejectProposal('x', 'r', 'ssa')).toThrow(
       "Tool 'aegis_reject_proposal' is not available on the 'ssa' surface",
     );
+    expect(repo.getProposal('boot-v4b')?.status).toBe('pending');
+    expect(() => service.approveProposal('boot-v4b', undefined, 'ssa')).toThrow(
+      "Tool 'aegis_approve_proposal' is not available on the 'ssa' surface",
+    );
   });
 
-  it('(c) allows the 8 ssa methods on the ssa surface', async () => {
-    insertPendingBootstrap(repo, 'boot-v4');
+  it('(c) allows the 7 ssa methods on the ssa surface', async () => {
     expect(() => service.listProposals({}, 'ssa')).not.toThrow();
     expect(service.getProposal('missing', 'ssa')).toBeUndefined();
-    expect(() => service.approveProposal('boot-v4', undefined, 'ssa')).not.toThrow();
-    expect(repo.getProposal('boot-v4')?.status).toBe('approved');
     expect(() => service.archiveObservations(90, 'ssa')).not.toThrow();
     expect(() => service.getStats('ssa')).not.toThrow();
     await expect(service.syncDocs({}, 'ssa')).resolves.toBeDefined();
@@ -324,7 +328,7 @@ describe('V-4: service-layer surface gating', () => {
     await expect(service.analyzeAndPropose(new RuleBasedAnalyzer(), 'compile_miss', 'ssa')).resolves.toBeDefined();
   });
 
-  it('(d) rejects the 8 ssa methods on the agent surface', async () => {
+  it('(d) rejects the 7 ssa methods and approveProposal on the agent surface', async () => {
     expect(() => service.listProposals({}, 'agent')).toThrow(SurfaceViolationError);
     expect(() => service.getProposal('missing', 'agent')).toThrow(SurfaceViolationError);
     expect(() => service.approveProposal('x', undefined, 'agent')).toThrow(SurfaceViolationError);
