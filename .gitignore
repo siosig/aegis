@@ -12,3 +12,5 @@ docs/会話履歴*
 /specs/
 /.claude-plugin-local/
 /.serena/
+/report/
+/tmp/

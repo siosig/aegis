@@ -4,6 +4,7 @@
 
 - This working copy is the owner's personal fork (`origin` = `git@github-personal:siosig/aegis.git`). It is maintained to optimize the owner's own environment, and changes accumulate on this fork.
 - **[MUST NOT] Do not create pull requests to the upstream repository (`fuwasegu/aegis`) or any other repository, and do not suggest creating one.** Push only to `origin`.
+- aegis: 導入済み。運用は ~/.claude/library/aegis.md に従う。
 
 ## Architecture
 
