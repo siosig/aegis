@@ -1,15 +1,15 @@
 ---
-description: "aegis（このフォーク）の現行の外部仕様（MCP サーバーの起動引数、DB の場所と未導入時の動作、サーフェスごとのツール、aegis_compile_context の入出力、CLI のサブコマンドと終了コード、環境変数、永続ファイル、フォーク固有の振る舞い）。ツールや CLI の挙動を変える・呼び出し方を確かめる・既定値を調べるときに読む。"
+description: "aegis（このフォーク）の現行の外部仕様（MCP サーバーの起動引数、DB の場所と待機モード、サーフェスごとのツール、aegis_compile_context の入出力、CLI のサブコマンドと終了コード、環境変数、永続ファイル、フォーク固有の振る舞い）。ツールや CLI の挙動を変える・呼び出し方を確かめる・既定値を調べるときに読む。"
 updated: 2026-11-01
-keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, AEGIS_SNAPSHOT_RETENTION]
+keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, dormant, 待機モード, CLAUDE.md, AEGIS_SNAPSHOT_RETENTION]
 ---
 # aegis 仕様
 
 ## 概要（簡潔に）
 
 - aegis は、編集対象のファイルパスから DAG（パスと文書を結ぶエッジ）をたどり、AI エージェントに渡す文書の集合を決定的に返す MCP サーバー（stdio）である。パッケージは `@fuwasegu/aegis` 版 1.1.0、入口は `dist/main.js`、Node.js 26 以上を要する。
-- MCP のツールは 3 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`ssa` サーフェスは agent の 6 ツールに 7 ツールを足した 13 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する（`agent` ⊂ `ssa` ⊂ `admin`）。
-- 知識の正本（Canonical Knowledge）は SQLite の DB にある。MCP サーバーは、`--db` を明示したとき、またはプロジェクトルートに `.aegis/` があるときだけ DB ファイルを開く・作る。どちらでもなければ空のインメモリ DB で動き、何も保存せず、「未導入」を stderr と `aegis_compile_context` の `notices` で知らせる。
+- MCP のツールは 3 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`ssa` サーフェスは agent の 6 ツールに 7 ツールを足した 13 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する（`agent` ⊂ `ssa` ⊂ `admin`）。ただし、プロジェクトに導入の目印が無く `--db` も無いときは待機モードで起動し、サーフェスによらず 2 ツール（`aegis_init_detect`・`aegis_workspace_status`）だけを登録する。
+- 知識の正本（Canonical Knowledge）は SQLite の DB にある。MCP サーバーは、`--db` を明示したとき、または導入の目印（プロジェクトルートの `CLAUDE.md` の `aegis: 導入済み` を含む行、または `.aegis`）があるときだけ DB ファイルを開く・作る。どちらでもなければ待機モードで動き、空のインメモリ DB を使い、ファイルを作らず、「未導入」を stderr と `aegis_workspace_status` の応答で知らせる。
 - 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`stats`・`doctor`・`share-*` の 6 種）。
 - 内部設計と「元に戻してはいけない判断」の理由は `docs/plan.md` に置く。本書は外から観測できる振る舞いだけを書く。
 
@@ -38,23 +38,40 @@ keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, no
 - MCP の initialize で名乗るサーバー名は `aegis-<surface>`（`aegis-agent`・`aegis-ssa`・`aegis-admin`）、版は `0.1.0` で、パッケージの版とは連動しない。
 - 起動時の `source_path` の正規化（ADR-013 の baseline の移行）は `admin` で起動したときだけ行い、`agent`・`ssa` では行わない。
 
-## DB の場所と未導入時の動作
+## DB の場所と待機モード
 
-MCP サーバーは、起動時に次の順で DB を決める。
+MCP サーバーは、起動時に 1 回だけ、次の順でモードと DB を決める。
 
-1. `--db` が無く、かつ `<project-root>/.aegis/` が無いとき、ディレクトリもファイルも作らず、空のインメモリ DB で起動する。stderr に `[aegis] <project-root>/.aegis/ not found: Aegis is not installed in this project. Using an empty in-memory database; nothing is persisted. Create the .aegis/ directory and restart the MCP server to install.` を出す。
-2. それ以外のとき、DB ファイルの親ディレクトリを作り、その親ディレクトリに `.gitignore` が無ければ内容 `*` で作り、DB ファイルを開く（無ければ作る）。
+1. `--db` を明示したとき: 目印を見ずに通常モードで起動し、`--db` のパスの DB を使う。
+2. `--db` が無く、`CLAUDE.md` の目印か `.aegis` のどちらかがあるとき: 通常モードで起動し、`<project-root>/.aegis/aegis.db` を使う。目印が `CLAUDE.md` の行だけで `.aegis/` が無いときは、`.aegis/` と内容 `*` の `.aegis/.gitignore` を作る。
+3. `--db` が無く、目印がどちらも無いとき: 待機モードで起動する。空のインメモリ DB を使い、ディレクトリもファイルも作らない。stderr に次の 1 行を出す。
 
-- 導入の手順は「`<project-root>/.aegis/` を作り、MCP サーバーを再起動する」である。
-- インメモリで動いている間も全ツールは呼べるが、`aegis_init_confirm` や承認を行っても終了とともに消える。インメモリでは snapshot が無いので、`aegis_compile_context` は空の結果に警告 `Project not initialized (no snapshot exists)` と未導入の notice を付けて返す。
+```
+[aegis] Dormant mode: Aegis is not installed in <project-root> (no line containing "aegis: 導入済み" in CLAUDE.md and no .aegis/). Only aegis_init_detect and aegis_workspace_status are available and nothing is written to disk. To install, add a line containing "aegis: 導入済み" to CLAUDE.md or create .aegis/, then restart the MCP server.
+```
+
+通常モードでは、DB ファイルの親ディレクトリを作り、その親ディレクトリに `.gitignore` が無ければ内容 `*` で作り、DB ファイルを開く（無ければ作る）。
+
+- 導入の目印は次の 2 種である。実装は `src/core/init/install-marker.ts`。
+  - `<project-root>/CLAUDE.md`（プロジェクトルートの 1 か所だけ）の本文に、`aegis: 導入済み` が部分一致で含まれる。全角・半角、大文字・小文字、空白などの揺れは吸収しない。`CLAUDE.md` が無い、または読めないときは目印が無いものとして扱う。
+  - `<project-root>/.aegis` が存在する。ファイルでも存在扱いにする（そのあと DB を開く処理が失敗する）。
+- 待機モードでは、サーフェスによらず `aegis_init_detect`・`aegis_workspace_status` の 2 ツールだけを登録し、resource `aegis://guide/workflow` も登録しない。タガー（IntentTagger）は作らない。ほかのツールはツール一覧に出ない（「サーフェスとツール一覧」の節）。
+- 目印が `CLAUDE.md` の行だけで、`.aegis/` を作れない（プロジェクトルートが書き込み不可など）ときは、待機モードに落とさず、`EACCES` などの `Fatal error` で終了コード 1 になる（仕様として受け入れている）。
+- 判定は起動時に 1 回だけで、起動中に目印を監視しない。導入の手順は「`CLAUDE.md` に `aegis: 導入済み` を含む行を足す（または `.aegis/` を作る）、MCP サーバーを再起動（再接続）する」である。
 - `--db` を明示したときは、親ディレクトリに `.gitignore`（内容 `*`）が無ければ作る。プロジェクトルートなどを親に持つパスを指定すると、そのディレクトリに `.gitignore` ができる。
-- 未導入の判定は MCP サーバーの起動だけに効く。CLI のサブコマンドは DB ファイルの有無で判定し、`share-hydrate` 以外は DB ファイルが無ければ失敗する（「CLI のサブコマンドと終了コード」の節）。
+- 待機モードの判定は MCP サーバーの起動だけに効く。CLI のサブコマンドは DB ファイルの有無で判定し、`share-hydrate` 以外は DB ファイルが無ければ失敗する（「CLI のサブコマンドと終了コード」の節）。
 - 既存の DB ファイルが 0 バイトのときは 1 度だけ読み直し、それでも空なら開くことを拒否してエラーにする。
 - DB が初期化済みで、`adapter_meta` に記録した版がパッケージの版と違う（または記録が無い）ときは、起動時に stderr へ `[aegis] Adapter templates may be outdated. Run \`npx @fuwasegu/aegis deploy-adapters\` to update.` を出し、`aegis_compile_context` の `notices` にも載せる。
 
 ## サーフェスとツール一覧
 
 `agent` の 6 ツールは 3 つのサーフェスすべてに登録する。`aegis_list_proposals`・`aegis_get_proposal`・`aegis_approve_proposal`・`aegis_archive_observations`・`aegis_get_stats`・`aegis_process_observations`・`aegis_sync_docs` の 7 ツールは `ssa` と `admin` に、残りの管理用の 11 ツールは `admin` にだけ登録する。サービス層でも、`agent` はすべての管理用の操作を、`ssa` は `SSA_ALLOWED_OPERATIONS`（上の 7 ツールが使う操作と、それらが内部で呼ぶ `analyzeAndPropose`）以外の操作を `SurfaceViolationError` で拒否する（ADR-020）。
+
+待機モードでは、サーフェスによらず `aegis_init_detect`・`aegis_workspace_status` の 2 ツールだけを登録し、resource も出さない。待機モードの `aegis_workspace_status` は、`content[0]` に次の 1 文を、`content[1]` に JSON を返す。
+
+```
+Aegis is in dormant mode: it is not installed in this project (no line containing "aegis: 導入済み" in CLAUDE.md and no .aegis/), so the database is empty and in-memory. To install, add a line containing "aegis: 導入済み" to the project's CLAUDE.md or create .aegis/, then reconnect the MCP server.
+```
 
 | ツール | サーフェス | 引数（主なもの） | 振る舞い |
 |---|---|---|---|
@@ -163,13 +180,12 @@ MCP サーバーは、起動時に次の順で DB を決める。
 
 `notices` は次の順に並ぶ。いずれも時刻や運用状態に依存するので、決定性（P-1）の対象外である。
 
-1. 未導入: `Aegis is not installed in this project (no .aegis/ directory). The knowledge base is empty and changes are not persisted. Create .aegis/ and restart the MCP server to install.`
-2. アダプタの版が古い（「DB の場所と未導入時の動作」の節）。
-3. プロジェクト共有の状態が `bundle_newer`・`local_ahead`・`diverged`・`unreadable_bundle` のとき、`[project-share] ...` の案内。`not_configured` と `in_sync` では出さない。
-4. pending の提案の件数。
-5. 未分析と skip の Observation の合計が 5 件以上のときの案内。
-6. reconcile の滞留。今回返す文書のうち `file-anchored` のものが対象である。`hash-sync`・`anchor-sync` の文書は、最後の同期（`source_synced_at`）から 90 日以上たった、または同期の記録が無いときに 1 文書ずつ出す。`anchor-sync` の文書で anchor の解決に失敗した Observation が未解決のものも 1 文書ずつ出す。`semantic-review` の文書は件数でまとめて 1 つ出す。
-7. `min_relevance` で外した文書の件数。
+1. アダプタの版が古い（「DB の場所と待機モード」の節）。
+2. プロジェクト共有の状態が `bundle_newer`・`local_ahead`・`diverged`・`unreadable_bundle` のとき、`[project-share] ...` の案内。`not_configured` と `in_sync` では出さない。
+3. pending の提案の件数。
+4. 未分析と skip の Observation の合計が 5 件以上のときの案内。
+5. reconcile の滞留。今回返す文書のうち `file-anchored` のものが対象である。`hash-sync`・`anchor-sync` の文書は、最後の同期（`source_synced_at`）から 90 日以上たった、または同期の記録が無いときに 1 文書ずつ出す。`anchor-sync` の文書で anchor の解決に失敗した Observation が未解決のものも 1 文書ずつ出す。`semantic-review` の文書は件数でまとめて 1 つ出す。
+6. `min_relevance` で外した文書の件数。
 
 ## aegis_observe のイベント種別
 
@@ -242,7 +258,7 @@ MCP サーバーは、起動時に次の順で DB を決める。
 
 このフォークで上流に足した振る舞いである。設計の理由は `docs/plan.md` と ADR-019 にある。
 
-- 未導入のプロジェクトで DB を作らない（「DB の場所と未導入時の動作」の節）。
+- 未導入のプロジェクトでは待機モードで起動する（「DB の場所と待機モード」の節）。
 - `approve-pending` は pending の提案を `bootstrap → new_doc → update_doc → add_edge → retarget_edge → remove_edge → deprecate → materialize` の順（同じ種別の中は作成順）に、1 件ずつ別のトランザクションで承認する。途中で失敗しても成功した承認は残る。
   - `bundle_id` のある提案は承認せず `reason: "bundled"` で `skipped` に入れる。
   - 同じ文書への `update_doc` が複数あるときは、最新の 1 件だけを候補にし、古いものを `reason: "superseded"` で却下する。最新の 1 件も、本文がソースファイルの全体と一致しなければ `reason: "stale_content"` で却下する。ソースファイルの無い文書は比較せずに承認する。
@@ -258,11 +274,12 @@ MCP サーバーは、起動時に次の順で DB を決める。
 
 ## 参照ドキュメント一覧
 
-本書はすべてコードから起こした（2026-11-01、コミット d784bef の時点）。README と `docs/technical-guide.ja.md` は照合にだけ使い、食い違う箇所はコードに従った。
+本書はすべてコードから起こした（2026-11-01、コミット d784bef の時点。「DB の場所と待機モード」の節は 003-dormant-mode の実装時点）。README と `docs/technical-guide.ja.md` は照合にだけ使い、食い違う箇所はコードに従った。
 
 | 資料 | 参照した目的 |
 |---|---|
-| `src/main.ts` | 起動引数・DB の場所と未導入の判定・CLI のサブコマンドと終了コード |
+| `src/main.ts` | 起動引数・DB の場所と待機モードの判定（`src/core/init/install-marker.ts`）・CLI のサブコマンドと終了コード |
+| `src/core/init/install-marker.ts` | 導入済みの目印の判定・起動モード・待機モードの文言 |
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | ツールの登録・引数・サーフェスの検査・Observation の検証・エラー応答 |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts`・`src/core/types.ts` | compile の選び方・出力の形・delivery・notices |
 | `src/core/store/database.ts`・`src/core/store/snapshot-pruning.ts` | DB ファイル・ロック・一時ファイル・snapshot の保持と圧縮 |

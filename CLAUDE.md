@@ -112,6 +112,7 @@ templates/      — Reserved for custom user templates (--template-dir)
 
 ## Design Decisions
 
+- Dormant mode: when neither a `CLAUDE.md` line containing `aegis: 導入済み` nor `.aegis/` exists in the project root and `--db` is not given, the MCP server uses an in-memory DB, writes nothing, and registers only `aegis_init_detect` and `aegis_workspace_status` on every surface (see docs/spec.md, ADR-019 addendum)
 - Agent surface registers 6 tools (compile_context, observe, get_compile_audit, get_known_tags, workspace_status, init_detect)
 - Admin surface registers 24 tools (the 6 agent tools + 18 admin-only)
 - SSA surface registers 13 tools (the 6 agent tools + list/get/approve proposal, archive_observations, get_stats, process_observations, sync_docs)

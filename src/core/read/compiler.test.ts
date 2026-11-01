@@ -798,45 +798,6 @@ describe('ContextCompiler — notices', () => {
     expect(result.notices).toHaveLength(0);
   });
 
-  it('puts the not-installed notice in an uninitialized (empty) database result when notInstalled is true', async () => {
-    const compiler = new ContextCompiler(repo, null, false, null, true);
-    const result = await compiler.compile({ target_files: ['src/a.ts'] });
-
-    expect(result.notices).toHaveLength(1);
-    expect(result.notices[0]).toContain('not installed');
-  });
-
-  it('puts the not-installed notice first when notInstalled is true', async () => {
-    bootstrap(repo, {
-      documents: [{ doc_id: 'd1', title: 'Doc', kind: 'guideline', content: 'c' }],
-      edges: [
-        {
-          edge_id: 'e1',
-          source_type: 'path',
-          source_value: 'src/**',
-          target_doc_id: 'd1',
-          edge_type: 'path_requires',
-          priority: 100,
-        },
-      ],
-    });
-
-    const compiler = new ContextCompiler(repo, null, true, null, true);
-    const result = await compiler.compile({ target_files: ['src/a.ts'] });
-
-    expect(result.notices.length).toBeGreaterThanOrEqual(2);
-    expect(result.notices[0]).toContain('not installed');
-    expect(result.notices[0]).toContain('.aegis/');
-    expect(result.notices[1]).toContain('deploy-adapters');
-  });
-
-  it('does not emit the not-installed notice by default', async () => {
-    const compiler = new ContextCompiler(repo);
-    const result = await compiler.compile({ target_files: ['src/a.ts'] });
-
-    expect(result.notices.some((n) => n.includes('not installed'))).toBe(false);
-  });
-
   it('returns empty notices by default (no adapterOutdated parameter)', async () => {
     bootstrap(repo, {
       documents: [{ doc_id: 'd1', title: 'Doc', kind: 'guideline', content: 'c' }],

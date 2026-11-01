@@ -9,6 +9,8 @@
  * - Admin Surface: the 13 SSA tools plus 11 admin-only (bundle preflight/approve, reject, init_confirm,
  *                  check_upgrade, apply_upgrade, import_doc, analyze_doc, analyze_import_batch,
  *                  execute_import_plan, list_observations) → 24 tools total
+ * - Dormant mode (createDormantAegisServer): Aegis not installed in the project and no --db.
+ *   Only workspace_status and init_detect (2 tools) on every surface; no resources.
  * - propose is NOT exposed (internal only)
  *
  * init_detect is on all surfaces (read-only preview).
@@ -17,6 +19,7 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
+import { DORMANT_WORKSPACE_STATUS_NOTICE } from '../core/init/install-marker.js';
 import { BudgetExceededError } from '../core/types.js';
 import { type AegisService, ObserveValidationError, type Surface } from './services.js';
 import { toolErrorResult } from './tool-error.js';
@@ -85,6 +88,78 @@ const sourceRefSchema = z
   .refine((r) => r.anchor_type === 'file' || (typeof r.anchor_value === 'string' && r.anchor_value.trim() !== ''), {
     message: 'anchor_value is required when anchor_type is section or lines',
   });
+
+/**
+ * Register `aegis_workspace_status`. When `leadingNotice` is a string (dormant mode) it is returned
+ * as `content[0]` ahead of the JSON snapshot; when `null` the response is the JSON snapshot only.
+ */
+function registerWorkspaceStatusTool(
+  server: McpServer,
+  service: AegisService,
+  surface: Surface,
+  leadingNotice: string | null,
+): void {
+  server.tool(
+    'aegis_workspace_status',
+    'Read-only workspace snapshot: recent compile regions (from compile_log), unresolved compile_miss observations without proposals, and pending proposal count. Does not mutate Canonical Knowledge.',
+    {
+      window_hours: z
+        .number()
+        .int()
+        .min(1)
+        .max(168)
+        .optional()
+        .describe('Rolling window in hours for active_regions (default: 24; max: 168).'),
+    },
+    async (params) => {
+      const result = service.workspaceStatus(surface, {
+        window_hours: params.window_hours,
+      });
+      const resultText: TextContent = { type: 'text', text: JSON.stringify(result, null, 2) };
+      if (leadingNotice === null) {
+        return { content: [resultText] };
+      }
+      return { content: [{ type: 'text', text: leadingNotice }, resultText] };
+    },
+  );
+}
+
+/** Register `aegis_init_detect` (read-only preview; available on every surface). */
+function registerInitDetectTool(server: McpServer, service: AegisService, surface: Surface): void {
+  server.tool(
+    'aegis_init_detect',
+    'Analyze a project and generate an initialization preview. Does not modify Canonical.',
+    {
+      project_root: z.string().describe('Absolute path to the project root directory'),
+      skip_template: z
+        .boolean()
+        .optional()
+        .describe('Skip template detection and create an empty knowledge base. Use aegis_import_doc to add documents.'),
+    },
+    async (params) => {
+      const preview = service.initDetect(params.project_root, surface, {
+        skip_template: params.skip_template,
+      });
+      const { _placeholders, ...publicPreview } = preview;
+      return { content: [{ type: 'text', text: JSON.stringify(publicPreview, null, 2) }] };
+    },
+  );
+}
+
+/**
+ * Dormant mode server: registers exactly `aegis_workspace_status` and `aegis_init_detect`
+ * regardless of `surface`, and no resources/prompts.
+ * Server info: `{ name: `aegis-${surface}`, version: '0.1.0' }` (same as createAegisServer).
+ */
+export function createDormantAegisServer(service: AegisService, surface: Surface): McpServer {
+  const server = new McpServer({
+    name: `aegis-${surface}`,
+    version: '0.1.0',
+  });
+  registerWorkspaceStatusTool(server, service, surface, DORMANT_WORKSPACE_STATUS_NOTICE);
+  registerInitDetectTool(server, service, surface);
+  return server;
+}
 
 export function createAegisServer(service: AegisService, surface: Surface): McpServer {
   const server = new McpServer({
@@ -250,48 +325,13 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
     },
   );
 
-  server.tool(
-    'aegis_workspace_status',
-    'Read-only workspace snapshot: recent compile regions (from compile_log), unresolved compile_miss observations without proposals, and pending proposal count. Does not mutate Canonical Knowledge.',
-    {
-      window_hours: z
-        .number()
-        .int()
-        .min(1)
-        .max(168)
-        .optional()
-        .describe('Rolling window in hours for active_regions (default: 24; max: 168).'),
-    },
-    async (params) => {
-      const result = service.workspaceStatus(surface, {
-        window_hours: params.window_hours,
-      });
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    },
-  );
+  registerWorkspaceStatusTool(server, service, surface, null);
 
   // ============================================================
   // init_detect — available on both surfaces (read-only preview)
   // ============================================================
 
-  server.tool(
-    'aegis_init_detect',
-    'Analyze a project and generate an initialization preview. Does not modify Canonical.',
-    {
-      project_root: z.string().describe('Absolute path to the project root directory'),
-      skip_template: z
-        .boolean()
-        .optional()
-        .describe('Skip template detection and create an empty knowledge base. Use aegis_import_doc to add documents.'),
-    },
-    async (params) => {
-      const preview = service.initDetect(params.project_root, surface, {
-        skip_template: params.skip_template,
-      });
-      const { _placeholders, ...publicPreview } = preview;
-      return { content: [{ type: 'text', text: JSON.stringify(publicPreview, null, 2) }] };
-    },
-  );
+  registerInitDetectTool(server, service, surface);
 
   // ============================================================
   // SSA + Admin Surface Tools — registered when surface is 'ssa' or 'admin'

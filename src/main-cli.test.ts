@@ -5,7 +5,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { execPath } from 'node:process';
@@ -1056,7 +1056,7 @@ describe('CLI — staleness-ack (dist/main.js)', () => {
   }, 30_000);
 });
 
-describe('MCP server startup — DB creation gate (dist/main.js)', () => {
+describe('MCP server startup — dormant mode gate (dist/main.js)', () => {
   let dir: string;
 
   beforeEach(() => {
@@ -1068,9 +1068,9 @@ describe('MCP server startup — DB creation gate (dist/main.js)', () => {
   });
 
   /** Spawns the agent-surface server, waits for the startup line on stderr, kills it, and returns stderr. */
-  function startAndKill(projectRoot: string): Promise<string> {
+  function startAndKill(projectRoot: string, extraArgs: string[] = []): Promise<string> {
     return new Promise((resolvePromise, reject) => {
-      const child = spawn(execPath, [MAIN_JS, '--surface', 'agent', '--project-root', projectRoot], {
+      const child = spawn(execPath, [MAIN_JS, '--surface', 'agent', '--project-root', projectRoot, ...extraArgs], {
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       let stderr = '';
@@ -1093,17 +1093,41 @@ describe('MCP server startup — DB creation gate (dist/main.js)', () => {
     });
   }
 
-  it('does not create .aegis/ and reports "not installed" when .aegis/ is absent', async () => {
+  it('starts in dormant mode and writes nothing when no install marker exists', async () => {
     const stderr = await startAndKill(dir);
-    expect(stderr).toContain('not installed');
-    expect(existsSync(join(dir, '.aegis'))).toBe(false);
+    expect(stderr).toContain('Dormant mode');
+    expect(stderr).toContain('(surface: agent, dormant)');
+    expect(readdirSync(dir)).toEqual([]);
   }, 15_000);
 
-  it('creates aegis.db and .gitignore when .aegis/ already exists', async () => {
+  it('starts in dormant mode when CLAUDE.md has no install marker line', async () => {
+    writeFileSync(join(dir, 'CLAUDE.md'), '# x\n');
+    const stderr = await startAndKill(dir);
+    expect(stderr).toContain('Dormant mode');
+    expect(readdirSync(dir)).toEqual(['CLAUDE.md']);
+  }, 15_000);
+
+  it('creates .aegis/ with .gitignore and aegis.db when CLAUDE.md has the install marker line', async () => {
+    writeFileSync(join(dir, 'CLAUDE.md'), 'aegis: 導入済み\n');
+    const stderr = await startAndKill(dir);
+    expect(stderr).not.toContain('Dormant mode');
+    expect(existsSync(join(dir, '.aegis', 'aegis.db'))).toBe(true);
+    expect(readFileSync(join(dir, '.aegis', '.gitignore'), 'utf-8')).toBe('*\n');
+  }, 15_000);
+
+  it('opens .aegis/aegis.db as before when .aegis/ exists without the marker line', async () => {
     mkdirSync(join(dir, '.aegis'));
     const stderr = await startAndKill(dir);
-    expect(stderr).not.toContain('not installed');
+    expect(stderr).not.toContain('Dormant mode');
     expect(existsSync(join(dir, '.aegis', 'aegis.db'))).toBe(true);
     expect(existsSync(join(dir, '.aegis', '.gitignore'))).toBe(true);
+  }, 15_000);
+
+  it('uses the explicit --db path without checking the install marker', async () => {
+    const stderr = await startAndKill(dir, ['--db', join(dir, 'custom', 'x.db')]);
+    expect(stderr).not.toContain('Dormant mode');
+    expect(existsSync(join(dir, 'custom', 'x.db'))).toBe(true);
+    expect(existsSync(join(dir, 'custom', '.gitignore'))).toBe(true);
+    expect(existsSync(join(dir, '.aegis'))).toBe(false);
   }, 15_000);
 });

@@ -14,12 +14,13 @@ Aegis is an MCP server that enforces architecture guidelines on AI coding agents
 ## Quick Start
 
 1. Add Aegis to your IDE's MCP config (see [Installation](#installation))
-2. Ask your AI agent: *"Initialize Aegis for this project and deploy the adapter rules."*
-3. The agent runs `aegis_init_detect` → `aegis_init_confirm` → `npx @fuwasegu/aegis deploy-adapters` automatically
+2. Add a line containing `aegis: 導入済み` to `CLAUDE.md` in the project root (or run `mkdir .aegis`), then restart (reconnect) the MCP server
+3. Ask your AI agent: *"Initialize Aegis for this project and deploy the adapter rules."*
+4. The agent runs `aegis_init_detect` → `aegis_init_confirm` → `npx @fuwasegu/aegis deploy-adapters` automatically
 
 The database is stored at `.aegis/aegis.db` in the project root. The `.aegis/` directory includes its own `.gitignore` — no manual configuration needed.
 
-The MCP server opens (and creates) this database only when `.aegis/` already exists under the project root, or when `--db` is given. Otherwise it runs with an empty in-memory database, persists nothing, and reports "not installed" on stderr and in the `notices` of `aegis_compile_context`. To install Aegis in a project, run `mkdir .aegis` and restart the MCP server.
+The MCP server opens (and creates) the database only when an install marker is present or `--db` is given. There are two markers: a line containing `aegis: 導入済み` in `CLAUDE.md` in the project root, or a `.aegis/` directory under the project root; either one is enough. If only the `CLAUDE.md` line is present and `.aegis/` does not exist, the server creates `.aegis/` and `.aegis/.gitignore` before running. If neither a marker nor `--db` is present, the server starts in dormant mode. In dormant mode it creates no files and exposes only two tools, `aegis_init_detect` and `aegis_workspace_status`, and it reports that Aegis is not installed on stderr and in the `aegis_workspace_status` response. To install Aegis in a project, place a marker as in step 2 above and restart the MCP server. The mode is decided once at startup, so a restart is required after placing a marker.
 
 ## Installation
 

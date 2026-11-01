@@ -2,10 +2,11 @@
  * `--surface` argument of the entry point (src/main.ts), run as a child process via tsx.
  * V-6: `--surface ssa` starts a server exposing the 13 ssa tools.
  * V-7: an invalid surface value exits with code 1.
+ * V-8: without an install marker, every surface starts in dormant mode with 2 tools.
  */
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -18,6 +19,7 @@ describe('main.ts --surface argument', () => {
   it('starts with --surface ssa and registers the 13 ssa tools', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'aegis-ssa-arg-'));
     try {
+      writeFileSync(join(dir, 'CLAUDE.md'), 'aegis: 導入済み\n');
       const transport = new StdioClientTransport({
         command: process.execPath,
         args: ['--import', 'tsx', 'src/main.ts', '--surface', 'ssa', '--project-root', dir],
@@ -51,12 +53,40 @@ describe('main.ts --surface argument', () => {
       } finally {
         await client.close();
       }
-      // A project without Aegis installed must not get a .aegis/ directory.
-      expect(readdirSync(dir)).toEqual([]);
+      expect(readdirSync(dir).sort()).toEqual(['.aegis', 'CLAUDE.md']);
+      expect(existsSync(join(dir, '.aegis', 'aegis.db'))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 30_000);
+
+  it.each(['agent', 'ssa', 'admin'] as const)(
+    'starts in dormant mode with --surface %s when Aegis is not installed',
+    async (surface) => {
+      const dir = mkdtempSync(join(tmpdir(), 'aegis-dormant-arg-'));
+      try {
+        const transport = new StdioClientTransport({
+          command: process.execPath,
+          args: ['--import', 'tsx', 'src/main.ts', '--surface', surface, '--project-root', dir],
+          cwd: REPO_ROOT,
+          stderr: 'ignore',
+        });
+        const client = new Client({ name: 'test-dormant-arg', version: '0.0.1' });
+        await client.connect(transport);
+        try {
+          const names = (await client.listTools()).tools.map((t) => t.name).sort();
+          expect(names).toEqual(['aegis_init_detect', 'aegis_workspace_status']);
+          expect(client.getServerVersion()?.name).toBe(`aegis-${surface}`);
+        } finally {
+          await client.close();
+        }
+        expect(readdirSync(dir)).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 
   it('exits with code 1 for an invalid surface value (SSA)', () => {
     const r = spawnSync(process.execPath, ['--import', 'tsx', 'src/main.ts', '--surface', 'SSA'], {

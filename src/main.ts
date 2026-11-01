@@ -45,6 +45,7 @@
  * SLM is disabled by default (ADR-004). Enable with --slm for expanded context.
  * Models are stored in ~/.aegis/models/ (shared across projects).
  * DB defaults to .aegis/aegis.db (per project).
+ * Without --db, a project with neither a CLAUDE.md line containing "aegis: 導入済み" nor .aegis/ starts in dormant mode (in-memory DB, 2 tools).
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -56,6 +57,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { parseProposalTypesOption } from './core/automation/approve-pending.js';
+import { DEFAULT_DB_DIR, formatDormantStartupMessage, resolveServerStartupMode } from './core/init/install-marker.js';
 import { shareHydrate } from './core/project-share/hydrate.js';
 import {
   shareExport,
@@ -74,7 +76,7 @@ import { LlamaEngine } from './expansion/llama-engine.js';
 import { LlamaIntentTagger } from './expansion/llama-intent-tagger.js';
 import { DEFAULT_MODEL, MODEL_CATALOG } from './expansion/models.js';
 import { OllamaClient } from './expansion/ollama-client.js';
-import { createAegisServer } from './mcp/server.js';
+import { createAegisServer, createDormantAegisServer } from './mcp/server.js';
 import type { Surface } from './mcp/services.js';
 import { AegisService, isSurface, type MaintenanceRunResult, SURFACES } from './mcp/services.js';
 
@@ -126,7 +128,6 @@ async function openServiceForStatsDoctor(options: StatsDoctorCli): Promise<Aegis
 
 const PACKAGE_VERSION: string = JSON.parse(readFileSync(join(SCRIPT_DIR, '../package.json'), 'utf-8')).version;
 
-const DEFAULT_DB_DIR = '.aegis';
 const DEFAULT_DB_PATH = join(DEFAULT_DB_DIR, 'aegis.db');
 
 interface CliArgs {
@@ -1171,18 +1172,12 @@ async function main() {
 
   const { surface, dbPath, templatesRoot, projectRoot } = cliArgs;
 
-  // The plugin starts this server in every cwd. Without an explicit --db, only open/create
-  // the default DB when .aegis/ already exists; otherwise run on an empty in-memory DB and
-  // leave the project untouched (ADR-019).
-  const notInstalled = !cliArgs.dbPathExplicit && !existsSync(join(projectRoot, DEFAULT_DB_DIR));
+  // Dormant mode (no install marker and no --db): in-memory DB, only 2 tools, nothing written (ADR-019 addendum).
+  const startupMode = resolveServerStartupMode({ dbPathExplicit: cliArgs.dbPathExplicit, projectRoot });
 
   let db: Awaited<ReturnType<typeof createDatabase>>;
-  if (notInstalled) {
-    console.error(
-      `[aegis] ${join(projectRoot, DEFAULT_DB_DIR)}/ not found: Aegis is not installed in this project. ` +
-        'Using an empty in-memory database; nothing is persisted. ' +
-        'Create the .aegis/ directory and restart the MCP server to install.',
-    );
+  if (startupMode === 'dormant') {
+    console.error(formatDormantStartupMessage(projectRoot));
     db = await createInMemoryDatabase();
   } else {
     // Ensure DB directory exists, with self-contained .gitignore
@@ -1195,7 +1190,7 @@ async function main() {
     db = await createDatabase(dbPath);
   }
   const repo = new Repository(db);
-  const tagger = await createTagger(cliArgs);
+  const tagger = startupMode === 'dormant' ? null : await createTagger(cliArgs);
 
   let adapterOutdated = false;
   if (repo.isInitialized()) {
@@ -1218,14 +1213,18 @@ async function main() {
     cliArgs.extraTemplateDirs,
     adapterOutdated,
     projectRoot,
-    notInstalled,
   );
-  const server = createAegisServer(service, surface);
+  const server =
+    startupMode === 'dormant' ? createDormantAegisServer(service, surface) : createAegisServer(service, surface);
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  console.error(`Aegis MCP server started (surface: ${surface})`);
+  console.error(
+    startupMode === 'dormant'
+      ? `Aegis MCP server started (surface: ${surface}, dormant)`
+      : `Aegis MCP server started (surface: ${surface})`,
+  );
 }
 
 main().catch((error) => {

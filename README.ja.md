@@ -14,12 +14,13 @@ Aegis は、AIコーディングエージェントにアーキテクチャガイ
 ## クイックスタート
 
 1. IDE の MCP 設定に Aegis を追加（[インストール](#インストール)を参照）
-2. AI エージェントに指示: *「Aegis を初期化してアダプタルールをデプロイして」*
-3. エージェントが `aegis_init_detect` → `aegis_init_confirm` → `npx @fuwasegu/aegis deploy-adapters` を自動で実行
+2. プロジェクトルートの `CLAUDE.md` に `aegis: 導入済み` を含む行を足し（または `mkdir .aegis` を実行し）、MCP サーバーを再起動（再接続）する
+3. AI エージェントに指示: *「Aegis を初期化してアダプタルールをデプロイして」*
+4. エージェントが `aegis_init_detect` → `aegis_init_confirm` → `npx @fuwasegu/aegis deploy-adapters` を自動で実行
 
 データベースはプロジェクトルートの `.aegis/aegis.db` に保存されます。`.aegis/` ディレクトリは自身の `.gitignore` を含むため、手動設定は不要です。
 
-MCP サーバーがこのデータベースを開く（作成する）のは、プロジェクトルート配下に `.aegis/` が既にあるとき、または `--db` を指定したときだけです。それ以外では空のインメモリデータベースで動作し、何も永続化せず、標準エラー出力と `aegis_compile_context` の `notices` に「未導入（not installed）」を報告します。プロジェクトに導入するには `mkdir .aegis` を実行し、MCP サーバーを再起動してください。
+MCP サーバーは、導入済みの目印があるか `--db` を指定したときだけデータベースを開きます（作成します）。目印は、プロジェクトルートの `CLAUDE.md` に `aegis: 導入済み` を含む行があること、またはプロジェクトルート配下に `.aegis/` があることの 2 種で、どちらか一方があれば導入済みとみなします。目印が `CLAUDE.md` の行だけで `.aegis/` が無いときは、`.aegis/` と `.aegis/.gitignore` を作ってから動作します。目印も `--db` も無いときは待機モードで起動します。待機モードではファイルを一切作らず、`aegis_init_detect` と `aegis_workspace_status` の 2 本だけを出し、標準エラー出力と `aegis_workspace_status` の応答で未導入であることを知らせます。プロジェクトに導入するには、上の手順 2 のとおり目印を置いて MCP サーバーを再起動してください。判定は起動時に 1 回だけ行うため、目印を置いたあとは再起動が必要です。
 
 ## インストール
 

@@ -6,8 +6,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { RuleBasedAnalyzer } from '../core/automation/rule-analyzer.js';
+import { DORMANT_WORKSPACE_STATUS_NOTICE } from '../core/init/install-marker.js';
 import { createInMemoryDatabase, Repository } from '../core/store/index.js';
-import { createAegisServer } from './server.js';
+import { createAegisServer, createDormantAegisServer } from './server.js';
 import {
   AegisService,
   isOperationAllowedOnSurface,
@@ -99,6 +100,23 @@ async function connect(
 ): Promise<{ client: Client; close: () => Promise<void> }> {
   const server = createAegisServer(service, surface);
   const client = new Client({ name: `test-client-${surface}`, version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  return {
+    client,
+    close: async () => {
+      await client.close();
+      await server.close();
+    },
+  };
+}
+
+async function connectDormant(
+  service: AegisService,
+  surface: Surface,
+): Promise<{ client: Client; close: () => Promise<void> }> {
+  const server = createDormantAegisServer(service, surface);
+  const client = new Client({ name: `test-client-dormant-${surface}`, version: '0.0.1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
   return {
@@ -317,5 +335,72 @@ describe('V-4: service-layer surface gating', () => {
     await expect(service.analyzeAndPropose(new RuleBasedAnalyzer(), 'compile_miss', 'agent')).rejects.toThrow(
       SurfaceViolationError,
     );
+  });
+});
+
+describe('dormant mode server', () => {
+  it.each(SURFACES)('lists exactly 2 tools on %s', async (surface) => {
+    const { client, close } = await connectDormant(service, surface);
+    try {
+      const names = (await client.listTools()).tools.map((t) => t.name).sort();
+      expect(names).toEqual(['aegis_init_detect', 'aegis_workspace_status']);
+    } finally {
+      await close();
+    }
+  });
+
+  it.each(SURFACES)('reports server name aegis-%s', async (surface) => {
+    const { client, close } = await connectDormant(service, surface);
+    try {
+      expect(client.getServerVersion()?.name).toBe(`aegis-${surface}`);
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not advertise the resources capability', async () => {
+    const { client, close } = await connectDormant(service, 'agent');
+    try {
+      expect(client.getServerCapabilities()?.resources).toBeUndefined();
+    } finally {
+      await close();
+    }
+  });
+
+  it('puts the dormant notice before the workspace status JSON', async () => {
+    const { client, close } = await connectDormant(service, 'agent');
+    try {
+      const result = await client.callTool({ name: 'aegis_workspace_status', arguments: {} });
+      expect(result.isError).not.toBe(true);
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content).toHaveLength(2);
+      expect(content[0].text).toBe(DORMANT_WORKSPACE_STATUS_NOTICE);
+      expect(JSON.parse(content[1].text)).toMatchObject({ pending_proposal_count: 0, active_regions: [] });
+    } finally {
+      await close();
+    }
+  });
+
+  it('does not add the dormant notice to workspace_status on the normal server', async () => {
+    const { client, close } = await connect(service, 'agent');
+    try {
+      const result = await client.callTool({ name: 'aegis_workspace_status', arguments: {} });
+      const content = result.content as Array<{ type: string; text: string }>;
+      expect(content).toHaveLength(1);
+      expect(() => JSON.parse(content[0].text)).not.toThrow();
+      expect(content[0].text).not.toContain(DORMANT_WORKSPACE_STATUS_NOTICE);
+    } finally {
+      await close();
+    }
+  });
+
+  it('serves aegis_init_detect in dormant mode', async () => {
+    const { client, close } = await connectDormant(service, 'agent');
+    try {
+      const result = await client.callTool({ name: 'aegis_init_detect', arguments: { project_root: projectRoot } });
+      expect(result.isError).not.toBe(true);
+    } finally {
+      await close();
+    }
   });
 });

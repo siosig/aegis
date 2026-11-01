@@ -10,7 +10,7 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 - aegis は決定的なコンテキストのコンパイラである。読み取り経路（`aegis_compile_context`）は承認済みの DAG だけを決まった順でたどり、推論を挟まない。知識の変更は「Observation（観測）→ Proposal（提案）→ 人の承認 → Canonical（正本）」の 1 本の経路だけを通る。
 - 権限はサーフェスで分ける。agent サーフェスは読むことと Observation を記録することしかできず、Canonical を変える操作は admin サーフェスと CLI にあり、ssa サーフェスは提案の 1 件ずつの承認（`aegis_approve_proposal`）だけを持つ。境界はツールの登録とサービス層の検査の 2 か所で守る。
 - DB は sql.js（WASM の SQLite）で、各プロセスが DB の全体をメモリに持つ。複数のプロセス（agent・admin・CLI）が同じファイルを使うので、書き込みは必ず「ロック → ディスクから読み直し → 変更 → 一時ファイルに書いて rename → ロック解除」の順で行う。
-- このフォークは ADR-019 で運用を軽くした。staleness の検査対象を `git ls-files` に絞り、一括承認と staleness の確定を CLI 専用で足し、snapshot を刈り込み、未導入のプロジェクトで DB を作らないようにした。
+- このフォークは ADR-019 で運用を軽くした。staleness の検査対象を `git ls-files` に絞り、一括承認と staleness の確定を CLI 専用で足し、snapshot を刈り込み、未導入のプロジェクトでは待機モードで起動するようにした。
 - 外から観測できる振る舞い（引数・既定値・終了コード）は `docs/spec.md` に置く。本書は内部の構造と、元に戻してはいけない判断の理由を書く。
 
 ## モジュール構成
@@ -19,15 +19,15 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 
 | パス | 役割 |
 |---|---|
-| `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け、DB の選択（未導入の判定）、MCP サーバーの起動 |
-| `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `ssa`・`admin` のときに ssa の 7 ツールを、`admin` のときだけ残りの管理用の 11 ツールを登録する |
+| `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け、起動モード（待機モード）による DB・サーバーの選択、MCP サーバーの起動 |
+| `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `ssa`・`admin` のときに ssa の 7 ツールを、`admin` のときだけ残りの管理用の 11 ツールを登録する。待機モードでは `createDormantAegisServer` が 2 本だけを登録する |
 | `src/mcp/services.ts` | サービスの窓口（`AegisService`）。管理用の操作は先頭で `assertSurfaceAllows` を呼ぶ（判定は `isOperationAllowedOnSurface`、ssa の許可リストは `SSA_ALLOWED_OPERATIONS`）。Observation の検証、分析器の登録表、`maintenance`、アダプタの配布もここ |
 | `src/mcp/tool-error.ts` | ツールのエラー応答に原因を必ず含める補助 |
 | `src/core/read/` | `compiler.ts`（DAG のたどり方・notices）、`allocator.ts`（delivery の割り当て）、`workspace-status.ts` |
 | `src/core/store/` | `database.ts`（sql.js の包装・ロック・永続化）、`repository.ts`（Canonical の読み書き・承認・snapshot）、`schema.ts`、`migrations/`（001〜016）、`snapshot-pruning.ts` |
 | `src/core/automation/` | Observation の分析器、提案の作成（`propose.ts`）、一括承認（`approve-pending.ts`） |
 | `src/core/optimization/` | staleness の検査（`staleness.ts`）、ファイルの列挙（`repo-file-listing.ts`）、staleness の確定（`staleness-ack.ts`）、取り込み計画、エッジ候補、文書分割の判定、co-change のキャッシュ |
-| `src/core/init/` | スタックの検出、テンプレートの読み込み、初期化、テンプレートの更新 |
+| `src/core/init/` | スタックの検出、テンプレートの読み込み、初期化、テンプレートの更新、導入済みの目印の判定（`install-marker.ts`） |
 | `src/core/project-share/` | 共有バンドルの書き出しと DB の作り直し、共有ソースの検査・整形・適用・書き出し、共有の状態の判定 |
 | `src/core/tagging/` | 意図タグの推定の口（`IntentTagger`） |
 | `src/adapters/` | `CLAUDE.md`・`AGENTS.md`・`.cursor/rules/` の管理ブロックとスキルの配布 |
@@ -132,12 +132,12 @@ sequenceDiagram
 - 理由: `maintenance` はドリフトの無い回にしか基準値を書き直さないので、確定の操作が無いと指摘が永久に残る。Observation もアーカイブしないと、重複除去によって同じ指摘が二度と記録されない。
 - 元に戻さないこと: どちらも MCP のツールにしない。`aegis_approve_proposal` に配列の引数を足す形でも一括承認を MCP に出さない。バンドルに属する提案は一括承認に混ぜず、全部か無しかの `aegis_approve_proposal_bundle` に任せる。
 
-## 未導入プロジェクトで DB を作らない判断
+## 未導入プロジェクトの待機モードの判断
 
-- 判断: MCP サーバーは、`--db` が無く `<project-root>/.aegis/` も無いとき、ディレクトリもファイルも作らず空のインメモリ DB（`createInMemoryDatabase`）で起動する。stderr に 1 行、`aegis_compile_context` の `notices` の先頭に `NOT_INSTALLED_NOTICE` を出す。導入は `.aegis/` を作って再起動することである。CLI のサブコマンドの振る舞いは変えない（ADR-019 追記）。
-- 理由: プラグインとして登録した MCP サーバーはどのカレントディレクトリでも起動する。以前は起動時に `.aegis/aegis.db` を無条件に作っていたため、aegis を使わないプロジェクトにも空の DB ができていた。
-- 元に戻さないこと: 起動時に無条件で `.aegis/` を作らない。
-- 採らなかった案: 最初の書き込みまで DB の作成を遅らせる。接続の差し替えと書き込み経路ごとの分岐が要り、実装が複雑になる。
+- 判断: MCP サーバーは、導入済みの目印が無く `--db` も無いとき、待機モードで起動する。目印は 2 種で、`<project-root>/CLAUDE.md` に `aegis: 導入済み` を含むことと、`<project-root>/.aegis` が存在することである（`.aegis` はファイルでも存在扱い）。`--db` を明示したときは目印を判定せず、従来どおり DB を開く。待機モードはディレクトリもファイルも作らず、空のインメモリ DB で、surface によらず `aegis_init_detect`・`aegis_workspace_status` の 2 本だけを登録する（`createDormantAegisServer`）。resource も tagger も出さない。stderr の起動行と `aegis_workspace_status` の応答で未導入を知らせる。判定と文言の置き場所は `src/core/init/install-marker.ts` で、判定は起動時に 1 回だけ行う。導入は目印を置いて再起動（再接続）することである。CLI のサブコマンドの振る舞いは変えない（ADR-019 追記）。
+- 理由: プラグインとして登録した MCP サーバーはどのカレントディレクトリでも起動する。使えないツールの定義と空の応答がエージェントの文脈を使う。以前は起動時に `.aegis/aegis.db` を無条件に作っていたため、aegis を使わないプロジェクトにも空の DB ができていた。
+- 元に戻さないこと: 起動時に無条件で `.aegis/` を作らない。待機モードで 2 本より多くのツールを出さない。判定をサービス層・コアの型（`AegisService` 等）に持ち込まない。
+- 採らなかった案: (1) 全ツールを出し、`aegis_compile_context` の `notices` で未導入を知らせる（d784bef の方式）。使えないツールの定義が文脈に載る。(2) 起動中に目印を監視してツールを切り替える。判定は起動時に 1 回と決めたため不要である。(3) 最初の書き込みまで DB の作成を遅らせる。接続の差し替えと書き込み経路ごとの分岐が要り、実装が複雑になる。
 
 ## 元に戻さない設計判断（ADR 別）
 
@@ -174,7 +174,7 @@ sequenceDiagram
 - D-4: 「snapshot の保持と圧縮」の節。
 - D-5: MCP のツールのエラーは原因を含める（`toolErrorResult`）。全ツールを包むミドルウェアにはしない。`compile_context` と `observe` は意図して例外を投げ直すからである。
 - D-6: `@modelcontextprotocol/sdk` は 1.x に留め、v2 への移行は別の作業にする。Node.js は 26 以上、パッケージマネージャは pnpm（`packageManager: pnpm@12.8.1`）で、`pnpm-workspace.yaml` の `allowBuilds` は `esbuild: false`、`node-llama-cpp: true` とする。
-- 追記: 「未導入プロジェクトで DB を作らない判断」の節。
+- 追記: 「未導入プロジェクトの待機モードの判断」の節。
 - 範囲外として決めたこと: DB スキーマの変更（`staleness_baselines` への版の列の追加を含む）、`knowledge_version` と `snapshot_id` の意味の変更、agent サーフェスへのツールの追加はしない。
 
 ## 採用しなかった案
@@ -204,7 +204,7 @@ sequenceDiagram
 
 | 資料 | 確認日 | 内容 |
 |---|---|---|
-| `src/main.ts` | 2026-11-01 | 未導入の判定、DB の選択、CLI の振り分け、`approve-pending`・`staleness-ack` の終了コード |
+| `src/main.ts` | 2026-11-01 | 待機モードの判定、DB の選択、CLI の振り分け、`approve-pending`・`staleness-ack` の終了コード |
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | 2026-11-01 | ツールの登録の分岐、`assertSurfaceAllows`・`SSA_ALLOWED_OPERATIONS`、分析器の登録表、`analyzeAndPropose`、`runMaintenance` |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts` | 2026-11-01 | 文書の選び方と並べ方、notices、delivery の採用順 |
 | `src/core/store/database.ts` | 2026-11-01 | ロック・読み直し・一時ファイルと rename・`createDatabase` |

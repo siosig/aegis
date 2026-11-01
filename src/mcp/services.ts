@@ -324,9 +324,8 @@ export class AegisService {
     private extraTemplateDirs: string[] = [],
     adapterOutdated = false,
     private projectRoot: string = process.cwd(),
-    notInstalled = false,
   ) {
-    this.compiler = new ContextCompiler(repo, tagger, adapterOutdated, () => this.computeShareNotice(), notInstalled);
+    this.compiler = new ContextCompiler(repo, tagger, adapterOutdated, () => this.computeShareNotice());
     this.analyzerRegistry = new Map<ObservationEventType, ObservationAnalyzer>([
       ['compile_miss', new CompileMissAnalyzer(repo)],
       ['review_correction', new ReviewCorrectionAnalyzer(repo)],
