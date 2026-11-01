@@ -30,6 +30,19 @@ pnpm test               # run all tests
 - `aegis_workspace_status` — Read-only workspace snapshot (recent compile regions, unresolved compile_miss backlog, pending proposal count).
 - `aegis_init_detect` — Analyze a project to generate initialization preview (read-only).
 
+## SSA Surface Tools (7 additional tools, 13 total)
+
+Optional surface for speck-serena-aegis (ssa) operations (ADR-020). Registers the 6 agent tools plus:
+
+- `aegis_list_proposals` / `aegis_get_proposal` — Review pending proposals.
+- `aegis_approve_proposal` — Approve a proposal (one at a time; same behavior as on admin).
+- `aegis_archive_observations` — Archive old observations.
+- `aegis_get_stats` — Aggregate knowledge counts and health signals.
+- `aegis_process_observations` — Trigger observation analysis pipeline for pending observations.
+- `aegis_sync_docs` — Synchronize imported documents with their source files.
+
+Not available on ssa (admin only): import_doc, analyze_doc, analyze_import_batch, execute_import_plan, check_upgrade, apply_upgrade, init_confirm, reject_proposal, bundle preflight/approve, list_observations. The service layer also rejects these (`SSA_ALLOWED_OPERATIONS` in `src/mcp/services.ts`).
+
 ## Admin Surface Tools (18 additional tools, 24 total)
 
 - `aegis_init_confirm` — Confirm initialization using preview_hash from init_detect.
@@ -49,7 +62,7 @@ pnpm test               # run all tests
 
 ## Key Invariants
 
-- **INV-6**: Agent surface cannot modify Canonical Knowledge. Admin tools are not registered on agent surface.
+- **INV-6**: Agent surface cannot modify Canonical Knowledge. Admin tools are not registered on agent surface. The ssa surface exposes only the 13 tools above (Canonical changes only via `aegis_approve_proposal`), enforced by both tool registration and `assertSurfaceAllows` in the service layer.
 - **P-1**: All context compilation is deterministic. Same input + same knowledge_version = same output.
 - **P-3**: All Canonical mutations require human approval (Observation → Proposed → Canonical).
 
@@ -101,7 +114,8 @@ templates/      — Reserved for custom user templates (--template-dir)
 
 - Agent surface registers 6 tools (compile_context, observe, get_compile_audit, get_known_tags, workspace_status, init_detect)
 - Admin surface registers 24 tools (the 6 agent tools + 18 admin-only)
-- init_detect is on both surfaces (read-only). init_confirm is admin-only (mutates Canonical)
+- SSA surface registers 13 tools (the 6 agent tools + list/get/approve proposal, archive_observations, get_stats, process_observations, sync_docs)
+- init_detect is on all surfaces (read-only). init_confirm is admin-only (mutates Canonical)
 - init_confirm must run in the admin process (previewCache is in-memory)
 - After init_confirm, adapters are auto-deployed (.cursor/rules/, CLAUDE.md) — non-fatal if deployment fails
 - SQLite + recursive CTE for DAG traversal (no graph DB needed)

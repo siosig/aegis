@@ -1,5 +1,5 @@
 ---
-description: "aegis（このフォーク）の内部設計（モジュール構成、不変条件と強制箇所、Observation から Canonical までの流れ、sql.js の DB 層の書き込み経路、snapshot の保持、staleness の Level 1〜3 と基準値）と、ADR 001〜019 のうち元に戻してはいけない判断の理由。コードを改修する前、とくにサーフェスの境界・承認の経路・DB の書き込み・staleness・CLI と MCP の分担に触る前に読む。"
+description: "aegis（このフォーク）の内部設計（モジュール構成、不変条件と強制箇所、Observation から Canonical までの流れ、sql.js の DB 層の書き込み経路、snapshot の保持、staleness の Level 1〜3 と基準値）と、ADR 001〜020 のうち元に戻してはいけない判断の理由。コードを改修する前、とくにサーフェスの境界・承認の経路・DB の書き込み・staleness・CLI と MCP の分担に触る前に読む。"
 updated: 2026-11-01
 keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P-1, P-3, ADR, Do not undo, sql.js, lock, reload, persist, staleness, baseline, 基準値, approve-pending, staleness-ack, observation, proposal, snapshot, pruning, VACUUM, not installed]
 ---
@@ -8,7 +8,7 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 ## 概要（簡潔に）
 
 - aegis は決定的なコンテキストのコンパイラである。読み取り経路（`aegis_compile_context`）は承認済みの DAG だけを決まった順でたどり、推論を挟まない。知識の変更は「Observation（観測）→ Proposal（提案）→ 人の承認 → Canonical（正本）」の 1 本の経路だけを通る。
-- 権限はサーフェスで分ける。agent サーフェスは読むことと Observation を記録することしかできず、Canonical を変える操作は admin サーフェスと CLI にだけある。境界はツールの登録とサービス層の検査の 2 か所で守る。
+- 権限はサーフェスで分ける。agent サーフェスは読むことと Observation を記録することしかできず、Canonical を変える操作は admin サーフェスと CLI にあり、ssa サーフェスは提案の 1 件ずつの承認（`aegis_approve_proposal`）だけを持つ。境界はツールの登録とサービス層の検査の 2 か所で守る。
 - DB は sql.js（WASM の SQLite）で、各プロセスが DB の全体をメモリに持つ。複数のプロセス（agent・admin・CLI）が同じファイルを使うので、書き込みは必ず「ロック → ディスクから読み直し → 変更 → 一時ファイルに書いて rename → ロック解除」の順で行う。
 - このフォークは ADR-019 で運用を軽くした。staleness の検査対象を `git ls-files` に絞り、一括承認と staleness の確定を CLI 専用で足し、snapshot を刈り込み、未導入のプロジェクトで DB を作らないようにした。
 - 外から観測できる振る舞い（引数・既定値・終了コード）は `docs/spec.md` に置く。本書は内部の構造と、元に戻してはいけない判断の理由を書く。
@@ -20,8 +20,8 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 | パス | 役割 |
 |---|---|
 | `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け、DB の選択（未導入の判定）、MCP サーバーの起動 |
-| `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `admin` のときだけ管理用ツールを登録する |
-| `src/mcp/services.ts` | サービスの窓口（`AegisService`）。管理用の操作は先頭で `assertAdmin` を呼ぶ。Observation の検証、分析器の登録表、`maintenance`、アダプタの配布もここ |
+| `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `ssa`・`admin` のときに ssa の 7 ツールを、`admin` のときだけ残りの管理用の 11 ツールを登録する |
+| `src/mcp/services.ts` | サービスの窓口（`AegisService`）。管理用の操作は先頭で `assertSurfaceAllows` を呼ぶ（判定は `isOperationAllowedOnSurface`、ssa の許可リストは `SSA_ALLOWED_OPERATIONS`）。Observation の検証、分析器の登録表、`maintenance`、アダプタの配布もここ |
 | `src/mcp/tool-error.ts` | ツールのエラー応答に原因を必ず含める補助 |
 | `src/core/read/` | `compiler.ts`（DAG のたどり方・notices）、`allocator.ts`（delivery の割り当て）、`workspace-status.ts` |
 | `src/core/store/` | `database.ts`（sql.js の包装・ロック・永続化）、`repository.ts`（Canonical の読み書き・承認・snapshot）、`schema.ts`、`migrations/`（001〜016）、`snapshot-pruning.ts` |
@@ -46,19 +46,19 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 | INV-3 snapshot の不変性（緩和済み） | 残した世代の行は変えない。保持外の世代の内容行は刈り込みうる（ADR-019 D-4） | `snapshot-pruning.ts` |
 | INV-4 版の単調増加 | 承認ごとに `knowledge_version` を 1 増やし、snapshot を作る | `_approveProposalInTransaction` |
 | INV-5 監査 | compile の結果は `compile_id` と `snapshot_id` を持ち、`compile_miss` は両方を参照する | `compiler.ts`、`validateObserveEvent` |
-| INV-6 権限分離 | agent サーフェスから Canonical を変えられない | `server.ts` の `if (surface === 'admin')` による登録の分岐と、`services.ts` の `assertAdmin`（`SurfaceViolationError`）の 2 か所 |
+| INV-6 権限分離 | agent サーフェスから Canonical を変えられない | `server.ts` の `if (surface === 'ssa' \|\| surface === 'admin')`（ssa の 7 ツール）と `if (surface === 'admin')`（admin だけの 11 ツール）による登録の分岐と、`services.ts` の `assertSurfaceAllows`（許可リスト `SSA_ALLOWED_OPERATIONS`、拒否は `SurfaceViolationError`）の 2 か所 |
 
-- INV-6 の原文は「Canonical を変えられるのは `approve_proposal` と `init_confirm` だけ」と書くが、現行ではバンドルの承認、`approve-pending`、`share-materialize`、`share-hydrate` も Canonical を変える。いずれも admin サーフェスか CLI にあり、agent サーフェスには無い。
+- INV-6 の原文は「Canonical を変えられるのは `approve_proposal` と `init_confirm` だけ」と書くが、現行ではバンドルの承認、`approve-pending`、`share-materialize`、`share-hydrate` も Canonical を変える。いずれも admin サーフェスか CLI にあり、agent・ssa サーフェスには無い。ssa から Canonical を変える経路は `aegis_approve_proposal`（1 件ずつ）だけである（ADR-020）。
 - agent の操作（`compileContext`・`observe` など）はサーフェスを検査しない。agent の操作が書くのは `compile_log` と `observations` だけで、Canonical に触れないからである。
 
 ## Observation から Canonical までの流れ
 
 ```mermaid
 flowchart LR
-  A[aegis_observe<br>agent・admin] --> O[(observations)]
+  A[aegis_observe<br>agent・ssa・admin] --> O[(observations)]
   I[aegis_import_doc<br>admin] --> O
   M[maintenance の staleness 検査] --> O
-  O --> P[analyzeAndPropose<br>admin のみ]
+  O --> P[analyzeAndPropose<br>admin・ssa]
   P --> R[(proposals<br>pending)]
   R --> AP[承認<br>approve_proposal・bundle・approve-pending]
   AP --> C[(Canonical<br>version+1・snapshot)]
@@ -125,7 +125,7 @@ sequenceDiagram
 
 ## approve-pending と staleness-ack の設計
 
-- 判断: 一括承認（`approve-pending`）は CLI 専用にし、MCP のツールにしない。`AegisService.approvePending` も `assertAdmin` を通す。種別の順（`bootstrap → new_doc → update_doc → add_edge → retarget_edge → remove_edge → deprecate → materialize`）に 1 件ずつ `repo.approveProposal` を呼び、1 件ごとに 1 トランザクションと 1 snapshot を作る。失敗は `process.exitCode = 1` で返し、`process.exit()` は呼ばない（ADR-019 D-3）。
+- 判断: 一括承認（`approve-pending`）は CLI 専用にし、MCP のツールにしない。`AegisService.approvePending` も `assertSurfaceAllows` を通す（ssa・agent では `SurfaceViolationError`）。種別の順（`bootstrap → new_doc → update_doc → add_edge → retarget_edge → remove_edge → deprecate → materialize`）に 1 件ずつ `repo.approveProposal` を呼び、1 件ごとに 1 トランザクションと 1 snapshot を作る。失敗は `process.exitCode = 1` で返し、`process.exit()` は呼ばない（ADR-019 D-3）。
 - 理由: AI エージェントが承認のために MCP を呼ぶ回数を 0 にしつつ、承認を人の手元の操作に保つためである。部分成功を残す要件があるので、全体を 1 トランザクションにはしない。`process.exit()` はパイプに流した stdout の JSON を途中で切る。
 - 同じ文書への `update_doc` は最新だけを候補にし、ソースファイルの全体と本文が違えば `stale_content` で却下する。`document_import` から作った `update_doc` は観測した時点の本文を持つので、古い観測からの提案を順に承認すると、文書が現在のファイルより古い本文に戻る（2026-11-01 に実際に起きた）。却下では根拠の Observation を再分析の対象に戻さない。戻すと次の `maintenance` が同じ古い提案を作り直す。
 - 判断: コードだけが変わったことによる Level 3 の指摘は、エッジを変えても消えない。人が文書とコードを照らして確かめた後に、admin 専用の CLI `staleness-ack` で確定する。確定は 2 段で行う。まず現在の Level 3 の指摘を数え、次に基準値なしとして取り直す。基準値の書き込みと Level 3 の Observation のアーカイブは 1 トランザクションで行う（ADR-019 D-1）。
@@ -155,7 +155,7 @@ sequenceDiagram
 | 008 | `compile_miss` の `target_doc_id` だけからは提案を作らない（構造化した記録として残し、`aegis_list_observations` で人がトリアージする）。`missing_doc` から `add_edge` を作る経路は残す |
 | 009 | 文書は丸ごと扱い、本文を途中で切らない。予算は inline の本文だけに効く UTF-8 のバイト数で、`source_path` の無い文書は必ず inline にし、収まらなければ `BUDGET_EXCEEDED_MANDATORY` で失敗する。`source_path` は repo 相対に正規化し、repo の外は拒否する。`aegis_import_doc` の `file_path` もこの規則で受け付ける（ADR-002 の「`file_path` を core の責務にしない」は、この ADR と ADR-010 で変わった）。応答は `schema_version: 2` を持つ |
 | 010 | 内容の正本は常に DB で、repo のファイルは提案の入力源にすぎない。`ownership`（`file-anchored`・`standalone`・`derived`）は同期の対象を決め、delivery は `source_path` の有無で決める。この 2 つの役割を混ぜない |
-| 011 | `intent_tags` を省略すると SLM による推定を許し、`[]` は拡張コンテキストを要らないという宣言、値があればそのタグだけを使う。この 3 通りの意味を変えない。`aegis_get_known_tags` は両サーフェスで読み取り専用 |
+| 011 | `intent_tags` を省略すると SLM による推定を許し、`[]` は拡張コンテキストを要らないという宣言、値があればそのタグだけを使う。この 3 通りの意味を変えない。`aegis_get_known_tags` は全サーフェスで読み取り専用 |
 | 012 | 診断（`audit_meta`・`debug_info`）は文書の選び方に影響させない。予算超過の失敗経路でも `audit_meta` を記録する |
 | 013 | スキーマの変更は `src/core/store/migrations/` の追加的な移行だけで行い、`down` は作らない。適用済みは `schema_migrations` で管理する |
 | 014 | `maintenance` は提案の作成と検知までで、承認しない。実行の時期は運用者に任せる（常駐しない） |
@@ -164,6 +164,7 @@ sequenceDiagram
 | 017 | 共有バンドル（`aegis-share/`）は配布物で、実行時の正本は DB だけである。同じ snapshot から同じバイト列を出し、読み込み時はハッシュを計算し直して信用しない。書き出しと読み込みは CLI で、MCP のツールにしない。`share-hydrate` は DB の丸ごとの置き換えで、`.aegis/aegis.db` を git で管理しない |
 | 018 | 共有ソースは `aegis-share/source/` に置き、エッジは起点の種別ごとにファイルを分ける。適用の前に検査と整形を必須にする。PR のマージを承認とみなすのは共有ソースの経路だけで、DB の承認の意味に一般化しない。`compile_context` は共有ソースを読まない |
 | 019 | 「フォーク固有の判断（ADR-019）」の節 |
+| 020 | ssa サーフェスはツールの登録（13 ツール）とサービス層の許可リスト（`SSA_ALLOWED_OPERATIONS`）の 2 か所で閉じる。登録だけで絞らない。取り込み・テンプレートの更新・却下・バンドルの承認・一括承認を ssa に出さない |
 
 ### フォーク固有の判断（ADR-019）
 
@@ -204,7 +205,7 @@ sequenceDiagram
 | 資料 | 確認日 | 内容 |
 |---|---|---|
 | `src/main.ts` | 2026-11-01 | 未導入の判定、DB の選択、CLI の振り分け、`approve-pending`・`staleness-ack` の終了コード |
-| `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | 2026-11-01 | ツールの登録の分岐、`assertAdmin`、分析器の登録表、`analyzeAndPropose`、`runMaintenance` |
+| `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | 2026-11-01 | ツールの登録の分岐、`assertSurfaceAllows`・`SSA_ALLOWED_OPERATIONS`、分析器の登録表、`analyzeAndPropose`、`runMaintenance` |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts` | 2026-11-01 | 文書の選び方と並べ方、notices、delivery の採用順 |
 | `src/core/store/database.ts` | 2026-11-01 | ロック・読み直し・一時ファイルと rename・`createDatabase` |
 | `src/core/store/repository.ts`・`src/core/store/snapshot-pruning.ts` | 2026-11-01 | 承認の処理、循環の検査、snapshot の作成と刈り込み、基準値の無効化 |
@@ -212,4 +213,4 @@ sequenceDiagram
 | `src/core/optimization/staleness.ts`・`src/core/optimization/repo-file-listing.ts`・`src/core/optimization/staleness-ack.ts` | 2026-11-01 | staleness の Level 1〜3、指紋、列挙、確定 |
 | `package.json`・`pnpm-workspace.yaml` | 2026-11-01 | 依存・Node.js の要件・pnpm の設定 |
 | `docs/プロジェクト計画v2.md` | 2026-11-01 | 原則 P-1〜P-5 と不変条件 INV-1〜INV-6 の原文 |
-| `docs/adr/001-document-import-strategy.md` 〜 `docs/adr/019-operations-lightening.md` | 2026-11-01 | 元に戻さない判断と採らなかった案 |
+| `docs/adr/001-document-import-strategy.md` 〜 `docs/adr/020-ssa-surface.md` | 2026-11-01 | 元に戻さない判断と採らなかった案 |

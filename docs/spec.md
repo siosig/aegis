@@ -1,14 +1,14 @@
 ---
 description: "aegis（このフォーク）の現行の外部仕様（MCP サーバーの起動引数、DB の場所と未導入時の動作、サーフェスごとのツール、aegis_compile_context の入出力、CLI のサブコマンドと終了コード、環境変数、永続ファイル、フォーク固有の振る舞い）。ツールや CLI の挙動を変える・呼び出し方を確かめる・既定値を調べるときに読む。"
 updated: 2026-11-01
-keywords: [aegis, MCP, surface, agent, admin, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, AEGIS_SNAPSHOT_RETENTION]
+keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, AEGIS_SNAPSHOT_RETENTION]
 ---
 # aegis 仕様
 
 ## 概要（簡潔に）
 
 - aegis は、編集対象のファイルパスから DAG（パスと文書を結ぶエッジ）をたどり、AI エージェントに渡す文書の集合を決定的に返す MCP サーバー（stdio）である。パッケージは `@fuwasegu/aegis` 版 1.1.0、入口は `dist/main.js`、Node.js 26 以上を要する。
-- MCP のツールは 2 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する。
+- MCP のツールは 3 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`ssa` サーフェスは agent の 6 ツールに 7 ツールを足した 13 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する（`agent` ⊂ `ssa` ⊂ `admin`）。
 - 知識の正本（Canonical Knowledge）は SQLite の DB にある。MCP サーバーは、`--db` を明示したとき、またはプロジェクトルートに `.aegis/` があるときだけ DB ファイルを開く・作る。どちらでもなければ空のインメモリ DB で動き、何も保存せず、「未導入」を stderr と `aegis_compile_context` の `notices` で知らせる。
 - 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`stats`・`doctor`・`share-*` の 6 種）。
 - 内部設計と「元に戻してはいけない判断」の理由は `docs/plan.md` に置く。本書は外から観測できる振る舞いだけを書く。
@@ -19,7 +19,7 @@ keywords: [aegis, MCP, surface, agent, admin, compile_context, delivery, notices
 
 | フラグ | 既定値 | 効果 |
 |---|---|---|
-| `--surface <agent\|admin>` | `agent` | 登録するツールの集合を選ぶ。`agent`・`admin` 以外の値はエラーを出して終了コード 1 で終わる |
+| `--surface <agent\|ssa\|admin>` | `agent` | 登録するツールの集合を選ぶ。`agent`・`ssa`・`admin` 以外の値（大文字の `SSA` を含む）は stderr に `Invalid surface: <値>. Must be one of: agent, ssa, admin.` を出して終了コード 1 で終わる |
 | `--db <PATH>` | `<project-root>/.aegis/aegis.db` | DB ファイルのパス。指定すると `.aegis/` の有無によらずこのファイルを開く・作る |
 | `--project-root <PATH>` | 起動時のカレントディレクトリ | 既定の DB の位置と、`source_path` を repo 相対で解く基準 |
 | `--templates <PATH>` | パッケージ内の `templates/`（`dist/` の 1 つ上） | 同梱テンプレートの場所 |
@@ -35,7 +35,8 @@ keywords: [aegis, MCP, surface, agent, admin, compile_context, delivery, notices
 - 同梱のモデルの一覧は `qwen3.5-4b`（既定）と `qwen3.5-9b` で、ダウンロード先は `~/.aegis/models/`（全プロジェクトで共有）である。
 - SLM の初期化に失敗した、または Ollama に接続できないときは、stderr にログを出して SLM なしで起動を続ける。
 - 起動に成功すると stderr に `Aegis MCP server started (surface: <surface>)` を出す。起動中の想定外の例外は `Fatal error:` を出して終了コード 1 で終わる。
-- MCP の initialize で名乗るサーバー名は `aegis-<surface>`、版は `0.1.0` で、パッケージの版とは連動しない。
+- MCP の initialize で名乗るサーバー名は `aegis-<surface>`（`aegis-agent`・`aegis-ssa`・`aegis-admin`）、版は `0.1.0` で、パッケージの版とは連動しない。
+- 起動時の `source_path` の正規化（ADR-013 の baseline の移行）は `admin` で起動したときだけ行い、`agent`・`ssa` では行わない。
 
 ## DB の場所と未導入時の動作
 
@@ -53,34 +54,34 @@ MCP サーバーは、起動時に次の順で DB を決める。
 
 ## サーフェスとツール一覧
 
-`agent` の 6 ツールは両方のサーフェスに登録する。管理用の 18 ツールは `admin` サーフェスにだけ登録する。サービス層でも管理用の操作はサーフェスが `admin` でなければ `SurfaceViolationError` で拒否する。
+`agent` の 6 ツールは 3 つのサーフェスすべてに登録する。`aegis_list_proposals`・`aegis_get_proposal`・`aegis_approve_proposal`・`aegis_archive_observations`・`aegis_get_stats`・`aegis_process_observations`・`aegis_sync_docs` の 7 ツールは `ssa` と `admin` に、残りの管理用の 11 ツールは `admin` にだけ登録する。サービス層でも、`agent` はすべての管理用の操作を、`ssa` は `SSA_ALLOWED_OPERATIONS`（上の 7 ツールが使う操作と、それらが内部で呼ぶ `analyzeAndPropose`）以外の操作を `SurfaceViolationError` で拒否する（ADR-020）。
 
 | ツール | サーフェス | 引数（主なもの） | 振る舞い |
 |---|---|---|---|
-| `aegis_compile_context` | agent・admin | 「aegis_compile_context の引数」の節 | 対象ファイルに対する文書の集合を返す。読み取りのほか `compile_log` に 1 行記録する |
-| `aegis_observe` | agent・admin | `event_type`、`related_compile_id`、`related_snapshot_id`、`payload` | Observation を 1 件記録するだけで、提案は作らない（「aegis_observe のイベント種別」の節） |
-| `aegis_get_compile_audit` | agent・admin | `compile_id` | 過去の compile の記録（要求・返した doc_id・`audit_meta`）を返す |
-| `aegis_get_known_tags` | agent・admin | なし | 承認済みの文書に解決できる意図タグの一覧、`knowledge_version`、タグ一覧の JSON の SHA-256 である `tag_catalog_hash` を返す |
-| `aegis_workspace_status` | agent・admin | `window_hours`（1〜168、既定 24） | 直近に compile された領域、未解決の `compile_miss`、pending の提案数、reconcile の滞留数（`hash_sync_stale`・`anchor_sync_stale`・`semantic_review_pending`）を返す |
-| `aegis_init_detect` | agent・admin | `project_root`、`skip_template` | プロジェクトを解析して初期化のプレビューと `preview_hash` を返す（読み取りのみ） |
+| `aegis_compile_context` | agent・admin・ssa | 「aegis_compile_context の引数」の節 | 対象ファイルに対する文書の集合を返す。読み取りのほか `compile_log` に 1 行記録する |
+| `aegis_observe` | agent・admin・ssa | `event_type`、`related_compile_id`、`related_snapshot_id`、`payload` | Observation を 1 件記録するだけで、提案は作らない（「aegis_observe のイベント種別」の節） |
+| `aegis_get_compile_audit` | agent・admin・ssa | `compile_id` | 過去の compile の記録（要求・返した doc_id・`audit_meta`）を返す |
+| `aegis_get_known_tags` | agent・admin・ssa | なし | 承認済みの文書に解決できる意図タグの一覧、`knowledge_version`、タグ一覧の JSON の SHA-256 である `tag_catalog_hash` を返す |
+| `aegis_workspace_status` | agent・admin・ssa | `window_hours`（1〜168、既定 24） | 直近に compile された領域、未解決の `compile_miss`、pending の提案数、reconcile の滞留数（`hash_sync_stale`・`anchor_sync_stale`・`semantic_review_pending`）を返す |
+| `aegis_init_detect` | agent・admin・ssa | `project_root`、`skip_template` | プロジェクトを解析して初期化のプレビューと `preview_hash` を返す（読み取りのみ） |
 | `aegis_init_confirm` | admin | `preview_hash` | プレビューを確定して Canonical を初期化する。プレビューはプロセス内にだけ保持するので、`aegis_init_detect` と同じ admin プロセスで呼ぶ。アダプタは配らず、`deploy-adapters` の実行を案内する文を返す |
-| `aegis_list_proposals` | admin | `status`、`limit`（最大 100、既定 20）、`offset` | 提案の一覧 |
-| `aegis_get_proposal` | admin | `proposal_id` | 提案 1 件と根拠の Observation |
-| `aegis_approve_proposal` | admin | `proposal_id`、`modifications` | 提案を承認して Canonical に反映する |
+| `aegis_list_proposals` | admin・ssa | `status`、`limit`（最大 100、既定 20）、`offset` | 提案の一覧 |
+| `aegis_get_proposal` | admin・ssa | `proposal_id` | 提案 1 件と根拠の Observation |
+| `aegis_approve_proposal` | admin・ssa | `proposal_id`、`modifications` | 提案を承認して Canonical に反映する |
 | `aegis_reject_proposal` | admin | `proposal_id`、`reason` | 提案を却下し、根拠の Observation を再分析できる状態に戻す |
 | `aegis_preflight_proposal_bundle` | admin | `bundle_id` | 同じ `bundle_id` の pending 提案をまとめて承認できるかを、書き込まずに確かめる |
 | `aegis_approve_proposal_bundle` | admin | `bundle_id` | 同じ `bundle_id` の pending 提案を 1 トランザクションで全部承認する（全部か無しか） |
 | `aegis_check_upgrade` | admin | なし | テンプレートの新しい版の有無を調べる |
 | `aegis_apply_upgrade` | admin | なし | テンプレートの更新を提案として作る |
-| `aegis_archive_observations` | admin | `days`（既定 90） | 解決済みの古い Observation をアーカイブする |
-| `aegis_get_stats` | admin | なし | 知識の件数・利用状況・健全性・プロジェクト共有の状態を返す |
+| `aegis_archive_observations` | admin・ssa | `days`（既定 90） | 解決済みの古い Observation をアーカイブする |
+| `aegis_get_stats` | admin・ssa | なし | 知識の件数・利用状況・健全性・プロジェクト共有の状態を返す |
 | `aegis_list_observations` | admin | `event_type`、`outcome`（`proposed`・`skipped`・`pending`）、`limit`、`offset` | Observation を処理結果で絞って列挙する |
 | `aegis_import_doc` | admin | `content` か `file_path`、`doc_id`、`title`、`kind`、`edge_hints`、`tags`、`source_path`、`source_refs` | 文書を取り込む Observation を記録し、続けて提案（`new_doc`・`add_edge`）を作って `proposal_ids` を返す。承認するまで Canonical は変わらない |
 | `aegis_analyze_doc` | admin | 文書 1 件 | 取り込み計画（分割の候補・重複の警告・診断）を返す（読み取りのみ） |
 | `aegis_analyze_import_batch` | admin | `items` | 複数文書の取り込み計画を返す（読み取りのみ） |
 | `aegis_execute_import_plan` | admin | `import_plan` か `batch_plan`、`bundle_id` | 取り込み計画を提案のバンドルとして作る |
-| `aegis_process_observations` | admin | `event_type` | 未分析の Observation を分析して提案を作る |
-| `aegis_sync_docs` | admin | `doc_ids` ほか | `file-anchored` の文書をソースファイルと照合し、差があれば `update_doc` の提案を作る |
+| `aegis_process_observations` | admin・ssa | `event_type` | 未分析の Observation を分析して提案を作る |
+| `aegis_sync_docs` | admin・ssa | `doc_ids` ほか | `file-anchored` の文書をソースファイルと照合し、差があれば `update_doc` の提案を作る |
 
 - `aegis_import_doc`・`aegis_analyze_doc`・`aegis_analyze_import_batch`・`aegis_execute_import_plan`・`aegis_process_observations`・`aegis_sync_docs` は、例外を本文 `<操作名>: <原因>`（例 `Sync failed: <原因>`）の `isError` 応答にして返す。原因の文字列は空にせず、スタックトレースは応答ではなく stderr に出す。
 - MCP リソース `aegis://guide/workflow` で運用手順の文書を返す。
@@ -269,3 +270,4 @@ MCP サーバーは、起動時に次の順で DB を決める。
 | `src/core/source-sync-staleness.ts`・`src/core/project-share/`・`src/adapters/`・`src/expansion/models.ts` | reconcile の notices・共有ファイル・アダプタの配布先・モデル |
 | `package.json` | パッケージ名・版・Node.js の要件 |
 | `docs/adr/019-operations-lightening.md` | フォーク固有の振る舞いの決定の範囲 |
+| `docs/adr/020-ssa-surface.md` | ssa サーフェスのツールの集合とサービス層の許可 |

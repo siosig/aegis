@@ -2,6 +2,7 @@
  * MCP Service Facade
  * Thin layer between MCP tool handlers and core logic.
  * Enforces INV-6: Agent Surface cannot modify Canonical.
+ * SSA surface: only the operations in SSA_ALLOWED_OPERATIONS (ADR-020).
  *
  * No business logic lives here — only delegation and surface authorization.
  */
@@ -97,7 +98,64 @@ import type {
   WorkspaceStatus,
 } from '../core/types.js';
 
-export type Surface = 'agent' | 'admin';
+/** MCP サーバーが起動できるサーフェスの一覧。`--surface` の検査とエラー文に使う。 */
+export const SURFACES = ['agent', 'ssa', 'admin'] as const;
+
+export type Surface = (typeof SURFACES)[number];
+
+/** `value` がサーフェス名と完全一致するか（大文字小文字を区別する）。 */
+export function isSurface(value: string | undefined): value is Surface {
+  return value !== undefined && (SURFACES as readonly string[]).includes(value);
+}
+
+/** サービス層でサーフェスを検査する操作の名前（SurfaceViolationError の文面に出る）。 */
+export type SurfaceGatedOperation =
+  | 'aegis_list_proposals'
+  | 'aegis_get_proposal'
+  | 'aegis_approve_proposal'
+  | 'aegis_preflight_proposal_bundle'
+  | 'aegis_approve_proposal_bundle'
+  | 'aegis_approve_pending'
+  | 'aegis_staleness_ack'
+  | 'aegis_reject_proposal'
+  | 'analyzeAndPropose'
+  | 'aegis_init_confirm'
+  | 'aegis_check_upgrade'
+  | 'aegis_apply_upgrade'
+  | 'aegis_archive_observations'
+  | 'aegis_maintenance'
+  | 'aegis_get_stats'
+  | 'aegis_list_observations'
+  | 'aegis_import_doc'
+  | 'aegis_analyze_doc'
+  | 'aegis_analyze_import_batch'
+  | 'aegis_execute_import_plan'
+  | 'aegis_sync_docs'
+  | 'aegis_process_observations';
+
+/** ssa サーフェスで許す操作。ssa の 7 本のツールと、それらが内部で呼ぶ analyzeAndPropose（ADR-020）。 */
+export const SSA_ALLOWED_OPERATIONS: ReadonlySet<SurfaceGatedOperation> = new Set<SurfaceGatedOperation>([
+  'aegis_list_proposals',
+  'aegis_get_proposal',
+  'aegis_approve_proposal',
+  'aegis_archive_observations',
+  'aegis_get_stats',
+  'aegis_sync_docs',
+  'aegis_process_observations',
+  'analyzeAndPropose',
+]);
+
+/** admin は全許可、ssa は SSA_ALLOWED_OPERATIONS だけ許可、agent は全拒否。 */
+export function isOperationAllowedOnSurface(operation: SurfaceGatedOperation, surface: Surface): boolean {
+  switch (surface) {
+    case 'admin':
+      return true;
+    case 'ssa':
+      return SSA_ALLOWED_OPERATIONS.has(operation);
+    case 'agent':
+      return false;
+  }
+}
 
 /** Result of `runMaintenance` (ADR-014 maintenance CLI). */
 export interface MaintenanceRunResult {
@@ -538,7 +596,7 @@ export class AegisService {
     params: { status?: string; limit?: number; offset?: number },
     surface: Surface,
   ): { proposals: object[]; total: number } {
-    this.assertAdmin('aegis_list_proposals', surface);
+    this.assertSurfaceAllows('aegis_list_proposals', surface);
     const { proposals, total } = this.repo.listProposals(params.status as any, params.limit ?? 20, params.offset ?? 0);
     return {
       proposals: proposals.map((p) => ({
@@ -553,7 +611,7 @@ export class AegisService {
   }
 
   getProposal(proposalId: string, surface: Surface): object | undefined {
-    this.assertAdmin('aegis_get_proposal', surface);
+    this.assertSurfaceAllows('aegis_get_proposal', surface);
     const proposal = this.repo.getProposal(proposalId);
     if (!proposal) return undefined;
 
@@ -581,34 +639,34 @@ export class AegisService {
     modifications: Record<string, unknown> | undefined,
     surface: Surface,
   ): CanonicalVersion {
-    this.assertAdmin('aegis_approve_proposal', surface);
+    this.assertSurfaceAllows('aegis_approve_proposal', surface);
     return this.repo.approveProposal(proposalId, modifications, this.projectRoot);
   }
 
   preflightProposalBundle(bundleId: string, surface: Surface): ProposalBundlePreflightResult {
-    this.assertAdmin('aegis_preflight_proposal_bundle', surface);
+    this.assertSurfaceAllows('aegis_preflight_proposal_bundle', surface);
     return this.repo.preflightProposalBundle(bundleId, this.projectRoot);
   }
 
   approveProposalBundle(bundleId: string, surface: Surface): CanonicalVersion {
-    this.assertAdmin('aegis_approve_proposal_bundle', surface);
+    this.assertSurfaceAllows('aegis_approve_proposal_bundle', surface);
     return this.repo.approveProposalBundle(bundleId, this.projectRoot);
   }
 
   /** Admin only. Not registered as an MCP tool (CLI `approve-pending` only). */
   approvePending(options: ApprovePendingOptions, surface: Surface): ApprovePendingResult {
-    this.assertAdmin('aegis_approve_pending', surface);
+    this.assertSurfaceAllows('aegis_approve_pending', surface);
     return approvePendingProposals(this.repo, options, this.projectRoot);
   }
 
   /** Admin only. Not registered as an MCP tool (CLI `staleness-ack` only). */
   ackStaleness(options: StalenessAckOptions, surface: Surface): StalenessAckResult {
-    this.assertAdmin('aegis_staleness_ack', surface);
+    this.assertSurfaceAllows('aegis_staleness_ack', surface);
     return acknowledgeStaleness(this.repo, this.projectRoot, options);
   }
 
   rejectProposal(proposalId: string, reason: string, surface: Surface): { proposal_id: string; status: 'rejected' } {
-    this.assertAdmin('aegis_reject_proposal', surface);
+    this.assertSurfaceAllows('aegis_reject_proposal', surface);
     this.repo.rejectProposal(proposalId, reason);
     return { proposal_id: proposalId, status: 'rejected' };
   }
@@ -626,7 +684,7 @@ export class AegisService {
     eventType: ObservationEventType,
     surface: Surface,
   ): Promise<{ analysis: AnalysisResult; proposals: ProposeResult; claimed_count: number }> {
-    this.assertAdmin('analyzeAndPropose', surface);
+    this.assertSurfaceAllows('analyzeAndPropose', surface);
 
     const observations = this.repo.claimUnanalyzedObservations(eventType);
     const claimedIds = observations.map((o) => o.observation_id);
@@ -669,7 +727,7 @@ export class AegisService {
   }
 
   initConfirm(previewHash: string, surface: Surface): CanonicalVersion {
-    this.assertAdmin('aegis_init_confirm', surface);
+    this.assertSurfaceAllows('aegis_init_confirm', surface);
 
     const cached = this.previewCache.get(previewHash);
     if (!cached) {
@@ -685,7 +743,7 @@ export class AegisService {
   }
 
   checkUpgrade(surface: Surface): UpgradePreview | { not_found: true; template_id: string } | null {
-    this.assertAdmin('aegis_check_upgrade', surface);
+    this.assertSurfaceAllows('aegis_check_upgrade', surface);
     const result = detectUpgrade(this.repo, this.templatesRoot, this.extraTemplateDirs);
     if (result) return result;
 
@@ -698,7 +756,7 @@ export class AegisService {
   }
 
   applyUpgrade(surface: Surface): { proposal_ids: string[] } {
-    this.assertAdmin('aegis_apply_upgrade', surface);
+    this.assertSurfaceAllows('aegis_apply_upgrade', surface);
     const preview = detectUpgrade(this.repo, this.templatesRoot, this.extraTemplateDirs);
     if (!preview?.has_changes) {
       return { proposal_ids: [] };
@@ -711,7 +769,7 @@ export class AegisService {
   }
 
   archiveObservations(days: number, surface: Surface): { archived_count: number } {
-    this.assertAdmin('aegis_archive_observations', surface);
+    this.assertSurfaceAllows('aegis_archive_observations', surface);
     const archived_count = this.repo.archiveOldObservations(days);
     return { archived_count };
   }
@@ -724,7 +782,7 @@ export class AegisService {
     surface: Surface,
     options: { dryRun: boolean; archiveDays?: number },
   ): Promise<MaintenanceRunResult> {
-    this.assertAdmin('aegis_maintenance', surface);
+    this.assertSurfaceAllows('aegis_maintenance', surface);
     const dryRun = options.dryRun;
     const archiveDays = options.archiveDays ?? 90;
 
@@ -867,11 +925,11 @@ export class AegisService {
   }
 
   /**
-   * ADR-012 / ADR-014: aggregate knowledge, compile_log usage, and health signals (admin read-only).
+   * ADR-012 / ADR-014: aggregate knowledge, compile_log usage, and health signals (read-only).
    * Usage aggregates scan all compile_log rows and parse JSON in-process (O(n) time/memory vs log size).
    */
   getStats(surface: Surface): AegisStats {
-    this.assertAdmin('aegis_get_stats', surface);
+    this.assertSurfaceAllows('aegis_get_stats', surface);
     const meta = this.repo.getKnowledgeMeta();
     const rows = this.repo.listCompileLogStatsRows();
     const docFreq = new Map<string, number>();
@@ -1006,7 +1064,7 @@ export class AegisService {
     }>;
     total: number;
   } {
-    this.assertAdmin('aegis_list_observations', surface);
+    this.assertSurfaceAllows('aegis_list_observations', surface);
 
     const result = this.repo.listObservations(
       { event_type: params.event_type, outcome: params.outcome },
@@ -1075,7 +1133,7 @@ export class AegisService {
     observation_id: string;
     warnings: string[];
   }> {
-    this.assertAdmin('aegis_import_doc', surface);
+    this.assertSurfaceAllows('aegis_import_doc', surface);
 
     const payload: Record<string, unknown> = { ...params };
 
@@ -1169,7 +1227,7 @@ export class AegisService {
     params: { content?: string; file_path?: string; source_label?: string | null; source_refs?: SourceRef[] },
     surface: Surface,
   ): ImportPlan {
-    this.assertAdmin('aegis_analyze_doc', surface);
+    this.assertSurfaceAllows('aegis_analyze_doc', surface);
 
     let body = params.content;
     let label: string | null = params.source_label ?? null;
@@ -1226,7 +1284,7 @@ export class AegisService {
     },
     surface: Surface,
   ): BatchImportPlan {
-    this.assertAdmin('aegis_analyze_import_batch', surface);
+    this.assertSurfaceAllows('aegis_analyze_import_batch', surface);
 
     if (!Array.isArray(params.items) || params.items.length === 0) {
       throw new Error('items must be a non-empty array');
@@ -1284,7 +1342,7 @@ export class AegisService {
     observation_ids: string[];
     skipped_duplicate_count: number;
   } {
-    this.assertAdmin('aegis_execute_import_plan', surface);
+    this.assertSurfaceAllows('aegis_execute_import_plan', surface);
 
     const bundleId =
       params.bundle_id && String(params.bundle_id).trim() !== '' ? String(params.bundle_id).trim() : uuidv4();
@@ -1519,7 +1577,7 @@ export class AegisService {
     anchor_sync_failures: Array<{ doc_id: string; kind: string }>;
     semantic_review_doc_ids: string[];
   }> {
-    this.assertAdmin('aegis_sync_docs', surface);
+    this.assertSurfaceAllows('aegis_sync_docs', surface);
 
     let docs = this.repo.getFileAnchoredDocuments();
     if (params.doc_ids && params.doc_ids.length > 0) {
@@ -1894,7 +1952,7 @@ export class AegisService {
 
   /**
    * Process pending observations by running the analyzer registry.
-   * Per ADR-003 D-2: admin-only explicit operation.
+   * Per ADR-003 D-2: explicit operation (admin and ssa surfaces only).
    *
    * Drains the queue in batches of 50 (same as {@link Repository.getUnanalyzedObservations} default).
    * `processed` counts observations completed without analyzer-level failure (excludes
@@ -1908,7 +1966,7 @@ export class AegisService {
     proposals_created: number;
     errors: string[];
   }> {
-    this.assertAdmin('aegis_process_observations', surface);
+    this.assertSurfaceAllows('aegis_process_observations', surface);
 
     const typesToProcess = eventType ? [eventType] : [...this.analyzerRegistry.keys()];
 
@@ -2017,9 +2075,9 @@ export class AegisService {
     }
   }
 
-  private assertAdmin(tool: string, surface: Surface): void {
-    if (surface !== 'admin') {
-      throw new SurfaceViolationError(tool, surface);
+  private assertSurfaceAllows(operation: SurfaceGatedOperation, surface: Surface): void {
+    if (!isOperationAllowedOnSurface(operation, surface)) {
+      throw new SurfaceViolationError(operation, surface);
     }
   }
 

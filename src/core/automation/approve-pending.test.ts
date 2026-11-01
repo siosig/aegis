@@ -6,7 +6,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAegisServer } from '../../mcp/server.js';
-import { AegisService, SurfaceViolationError } from '../../mcp/services.js';
+import { AegisService, SURFACES, type Surface, SurfaceViolationError } from '../../mcp/services.js';
 import { type AegisDatabase, createInMemoryDatabase, Repository } from '../store/index.js';
 import type { ProposalType } from '../types.js';
 import { type ApprovePendingResult, approvePendingProposals, parseProposalTypesOption } from './approve-pending.js';
@@ -482,12 +482,12 @@ describe('AegisService.approvePending — INV-6', () => {
     expect(pendingIds(fx)).toEqual(['p-edge', 'p-new', 'p-update']);
   });
 
-  it('keeps the MCP tool counts at 6 (agent) and 24 (admin) with no approve_pending tool', async () => {
+  it('keeps the MCP tool counts at 6 (agent), 13 (ssa), and 24 (admin) with no approve_pending tool', async () => {
     const fx = await createFixture();
     const service = new AegisService(fx.repo, TEMPLATES_ROOT);
 
-    const counts: Record<'agent' | 'admin', number> = { agent: 6, admin: 24 };
-    for (const surface of ['agent', 'admin'] as const) {
+    const counts: Record<Surface, number> = { agent: 6, ssa: 13, admin: 24 };
+    for (const surface of SURFACES) {
       const server = createAegisServer(service, surface);
       const client = new Client({ name: `test-client-${surface}`, version: '0.0.1' });
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();

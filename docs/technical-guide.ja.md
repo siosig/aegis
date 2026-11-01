@@ -419,6 +419,7 @@ Aegis が維持する6つの不変条件:
 - Observation → Proposal の証拠チェーン（`proposal_evidence`）
 
 ### INV-6: 権限分離
-- Agent Surface: 読み取りと Observation 層への書き込みのみ（5 ツール: 読み取り専用の `aegis_get_known_tags` を含む）
-- Admin Surface: Canonical 変更を含む全操作（17 ツール: 共通 5 + Admin 専用 12）
+- Agent Surface: 読み取りと Observation 層への書き込みのみ（6 ツール: 読み取り専用の `aegis_get_known_tags`・`aegis_workspace_status` を含む）
+- SSA Surface: agent の 6 ツールに、文書の同期・Observation の処理と書庫入れ・Proposal の一覧／取得／承認・統計を足したもの（13 ツール: 共通 6 + 7）。取り込み・テンプレート更新・却下・init_confirm・バンドルの承認は不可で、サービス層も `SSA_ALLOWED_OPERATIONS` の操作だけを許す（ADR-020）
+- Admin Surface: Canonical 変更を含む全操作（24 ツール: 共通 6 + Admin 専用 18）
 - AI エージェントが直接アーキテクチャを変更することを構造的に防止

@@ -25,11 +25,12 @@ The MCP server opens (and creates) this database only when `.aegis/` already exi
 
 **Requirements**: Node.js 26 or later.
 
-Aegis uses two MCP surfaces — both are required:
+Aegis provides three MCP surfaces — agent and admin are required; ssa is optional:
 
 | Surface | Role | Tools |
 |---------|------|-------|
 | **agent** | Context compilation, observation recording, and related reads — no Canonical mutations | 6 tools (compile, observe, audit, known_tags, workspace_status, detect) |
+| **ssa** (optional) | For speck-serena-aegis operations: sync docs, process/archive observations, list/get/approve proposals, stats — no import, template upgrade, reject, or bundle approval | 13 tools (6 shared + 7) |
 | **admin** | Initialization, approval, triage | 24 tools (6 shared + 18 admin-only) |
 
 > The agent surface alone cannot initialize a project or approve proposals. This separation ensures AI agents cannot modify architecture rules without human approval. ([INV-6](docs/technical-guide.md))
@@ -187,7 +188,7 @@ To keep imported documents in sync with source files:
 aegis_sync_docs()   # detects changes via content hash, creates update_doc proposals
 ```
 
-Both `aegis_import_doc` and `aegis_sync_docs` require the **admin** surface. For a detailed step-by-step bulk import workflow, see the `aegis-bulk-import` skill (deployed via `deploy-adapters`).
+`aegis_import_doc` requires the **admin** surface; `aegis_sync_docs` is available on the **admin** and **ssa** surfaces. For a detailed step-by-step bulk import workflow, see the `aegis-bulk-import` skill (deployed via `deploy-adapters`).
 
 ### 4. Report observations
 
@@ -381,6 +382,20 @@ You can also pass a HuggingFace URI directly: `--model hf:user/repo:file.gguf`
 | `aegis_workspace_status` | Read-only workspace snapshot: recent compile regions, unresolved compile_miss backlog, pending proposal count, reconcile backlog (hash-sync/anchor-sync/semantic-review) |
 | `aegis_init_detect` | Analyze a project to generate initialization preview |
 
+### MCP Tools — SSA Surface (additional 7 tools, 13 total)
+
+Optional surface for speck-serena-aegis (ssa) operations. Registers the 6 agent tools plus the following 7 tools, which behave exactly as on the admin surface. See [ADR-020](docs/adr/020-ssa-surface.md).
+
+| Tool | Description |
+|------|-------------|
+| `aegis_list_proposals` | List proposals with optional status filter |
+| `aegis_get_proposal` | Get full proposal details with evidence |
+| `aegis_approve_proposal` | Approve a pending proposal |
+| `aegis_archive_observations` | Archive old observations |
+| `aegis_get_stats` | Aggregate knowledge counts and health signals |
+| `aegis_process_observations` | Trigger observation analysis pipeline for pending observations |
+| `aegis_sync_docs` | Synchronize file-anchored documents with their source files (reconcile-mode-aware: hash-sync, anchor-sync, semantic-review) |
+
 ### MCP Tools — Admin Surface (additional 18 tools, 24 total)
 
 | Tool | Description |
@@ -460,7 +475,7 @@ npx @fuwasegu/aegis --list-models                           # List available SLM
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--surface` | `agent` | `agent` or `admin` |
+| `--surface` | `agent` | `agent`, `ssa`, or `admin` |
 | `--db` | `.aegis/aegis.db` | SQLite database path |
 | `--templates` | `./templates` | Bundled templates directory |
 | `--template-dir` | | Additional template search path (local overrides bundled) |

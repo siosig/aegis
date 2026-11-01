@@ -5,6 +5,7 @@
  *
  * MCP server mode:
  *   npx aegis --surface agent                    # Agent surface (default)
+ *   npx aegis --surface ssa                      # SSA surface (agent + sync/process/archive observations, proposals list/get/approve, stats)
  *   npx aegis --surface admin                    # Admin surface
  *   npx aegis --slm                              # Enable SLM for expanded context (opt-in)
  *   npx aegis --slm --model qwen3.5-9b           # Select SLM model from catalog
@@ -75,7 +76,7 @@ import { DEFAULT_MODEL, MODEL_CATALOG } from './expansion/models.js';
 import { OllamaClient } from './expansion/ollama-client.js';
 import { createAegisServer } from './mcp/server.js';
 import type { Surface } from './mcp/services.js';
-import { AegisService, type MaintenanceRunResult } from './mcp/services.js';
+import { AegisService, isSurface, type MaintenanceRunResult, SURFACES } from './mcp/services.js';
 
 interface StatsDoctorCli {
   projectRoot: string;
@@ -158,13 +159,15 @@ function parseArgs(): CliArgs {
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
-      case '--surface':
-        surface = args[++i] as Surface;
-        if (surface !== 'agent' && surface !== 'admin') {
-          console.error(`Invalid surface: ${surface}. Must be 'agent' or 'admin'.`);
+      case '--surface': {
+        const value = args[++i];
+        if (!isSurface(value)) {
+          console.error(`Invalid surface: ${value}. Must be one of: ${SURFACES.join(', ')}.`);
           process.exit(1);
         }
+        surface = value;
         break;
+      }
       case '--db':
         dbPath = args[++i];
         break;

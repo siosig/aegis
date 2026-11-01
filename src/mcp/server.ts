@@ -4,13 +4,14 @@
  *
  * Surface separation (INV-6):
  * - Agent Surface: compile_context, observe, get_compile_audit, get_known_tags, workspace_status, init_detect (6 tools)
- * - Admin Surface: same 6 plus 18 admin-only (list/get proposals, approve/reject, bundle preflight/approve,
- *                  init_confirm, check_upgrade, apply_upgrade, archive_observations, get_stats, import_doc,
- *                  analyze_doc, analyze_import_batch, execute_import_plan, list/process_observations, sync_docs)
- *                  → 24 tools total on admin surface (6 shared + 18 admin-only)
+ * - SSA Surface: the 6 agent tools plus list/get/approve proposal, archive_observations, get_stats,
+ *                process_observations, sync_docs (13 tools). See ADR-020.
+ * - Admin Surface: the 13 SSA tools plus 11 admin-only (bundle preflight/approve, reject, init_confirm,
+ *                  check_upgrade, apply_upgrade, import_doc, analyze_doc, analyze_import_batch,
+ *                  execute_import_plan, list_observations) → 24 tools total
  * - propose is NOT exposed (internal only)
  *
- * init_detect is on both surfaces (read-only preview).
+ * init_detect is on all surfaces (read-only preview).
  * init_confirm is admin-only (mutates Canonical).
  */
 
@@ -293,10 +294,10 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
   );
 
   // ============================================================
-  // Admin Surface Tools — only registered when surface === 'admin'
+  // SSA + Admin Surface Tools — registered when surface is 'ssa' or 'admin'
   // ============================================================
 
-  if (surface === 'admin') {
+  if (surface === 'ssa' || surface === 'admin') {
     server.tool(
       'aegis_list_proposals',
       'List proposals with optional status filter.',
@@ -342,6 +343,87 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
       },
     );
 
+    server.tool(
+      'aegis_archive_observations',
+      'Archive observations older than the specified number of days (default: 90).',
+      {
+        days: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('Archive observations older than this many days (default: 90)'),
+      },
+      async (params) => {
+        const result = service.archiveObservations(params.days ?? 90, surface);
+        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
+      },
+    );
+
+    server.tool(
+      'aegis_get_stats',
+      'Aggregate knowledge counts, compile_log usage metrics, and health signals (stale file-anchored docs, unanalyzed observations, orphaned tag_mappings). Read-only.',
+      {},
+      async () => {
+        const result = service.getStats(surface);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      },
+    );
+
+    server.tool(
+      'aegis_process_observations',
+      'Process pending observations through the analyzer pipeline, generating proposals. Per ADR-003: explicit operation (admin and ssa surfaces only).',
+      {
+        event_type: z
+          .enum([
+            'compile_miss',
+            'review_correction',
+            'pr_merged',
+            'manual_note',
+            'document_import',
+            'doc_gap_detected',
+            'staleness_detected',
+          ])
+          .optional()
+          .describe('Process only this event type (default: all types)'),
+      },
+      async (params) => {
+        try {
+          const result = await service.processObservations(params.event_type, surface);
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        } catch (e: unknown) {
+          return toolErrorResult('Processing failed', e);
+        }
+      },
+    );
+
+    server.tool(
+      'aegis_sync_docs',
+      'Synchronize file-anchored documents with their source files. Detects stale documents via content_hash and creates update_doc proposals. Returns skipped_invalid_anchor for unusable paths (missing, outside project, or resolve errors).',
+      {
+        doc_ids: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'Subset of document IDs to sync. If omitted, syncs all approved documents with ownership=file-anchored.',
+          ),
+      },
+      async (params) => {
+        try {
+          const result = await service.syncDocs({ doc_ids: params.doc_ids }, surface);
+          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+        } catch (e: unknown) {
+          return toolErrorResult('Sync failed', e);
+        }
+      },
+    );
+  }
+
+  // ============================================================
+  // Admin-only Surface Tools — registered only when surface === 'admin'
+  // ============================================================
+
+  if (surface === 'admin') {
     server.tool(
       'aegis_preflight_proposal_bundle',
       'Dry-run all pending proposals sharing a bundle_id: validates ordering and mutations; rolls back (no Canonical change).',
@@ -420,33 +502,6 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
       async () => {
         const result = service.applyUpgrade(surface);
         return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      },
-    );
-
-    server.tool(
-      'aegis_archive_observations',
-      'Archive observations older than the specified number of days (default: 90).',
-      {
-        days: z
-          .number()
-          .int()
-          .min(1)
-          .optional()
-          .describe('Archive observations older than this many days (default: 90)'),
-      },
-      async (params) => {
-        const result = service.archiveObservations(params.days ?? 90, surface);
-        return { content: [{ type: 'text', text: JSON.stringify(result) }] };
-      },
-    );
-
-    server.tool(
-      'aegis_get_stats',
-      'Aggregate knowledge counts, compile_log usage metrics, and health signals (stale file-anchored docs, unanalyzed observations, orphaned tag_mappings). Admin read-only.',
-      {},
-      async () => {
-        const result = service.getStats(surface);
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       },
     );
 
@@ -605,54 +660,6 @@ export function createAegisServer(service: AegisService, surface: Surface): McpS
       async (params) => {
         const result = service.listObservations(params, surface);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-      },
-    );
-
-    server.tool(
-      'aegis_process_observations',
-      'Process pending observations through the analyzer pipeline, generating proposals. Per ADR-003: admin-only explicit operation.',
-      {
-        event_type: z
-          .enum([
-            'compile_miss',
-            'review_correction',
-            'pr_merged',
-            'manual_note',
-            'document_import',
-            'doc_gap_detected',
-            'staleness_detected',
-          ])
-          .optional()
-          .describe('Process only this event type (default: all types)'),
-      },
-      async (params) => {
-        try {
-          const result = await service.processObservations(params.event_type, surface);
-          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: unknown) {
-          return toolErrorResult('Processing failed', e);
-        }
-      },
-    );
-
-    server.tool(
-      'aegis_sync_docs',
-      'Synchronize file-anchored documents with their source files. Detects stale documents via content_hash and creates update_doc proposals. Returns skipped_invalid_anchor for unusable paths (missing, outside project, or resolve errors).',
-      {
-        doc_ids: z
-          .array(z.string())
-          .optional()
-          .describe(
-            'Subset of document IDs to sync. If omitted, syncs all approved documents with ownership=file-anchored.',
-          ),
-      },
-      async (params) => {
-        try {
-          const result = await service.syncDocs({ doc_ids: params.doc_ids }, surface);
-          return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-        } catch (e: unknown) {
-          return toolErrorResult('Sync failed', e);
-        }
       },
     );
   }

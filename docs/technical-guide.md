@@ -420,5 +420,6 @@ The six invariants Aegis maintains:
 
 ### INV-6: Privilege Separation
 - Agent Surface: read and Observation writes only (6 tools: includes read-only `aegis_get_known_tags`, `aegis_workspace_status`)
+- SSA Surface: the 6 agent tools plus sync docs, process/archive observations, list/get/approve proposals, and stats (13 tools: 6 shared + 7). No import, template upgrade, reject, init_confirm, or bundle approval; the service layer allows only the operations in `SSA_ALLOWED_OPERATIONS` (ADR-020)
 - Admin Surface: all operations including Canonical mutations (24 tools: 6 shared + 18 admin-only)
 - Structurally prevents AI agents from directly modifying architecture rules

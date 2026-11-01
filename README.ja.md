@@ -25,11 +25,12 @@ MCP サーバーがこのデータベースを開く（作成する）のは、�
 
 **動作要件:** Node.js 26 以上。
 
-Aegis は 2 つの MCP surface を使います — 両方が必要です:
+Aegis は 3 つの MCP surface を提供します — agent と admin は必須、ssa は任意です:
 
 | Surface | 役割 | ツール数 |
 |---------|------|----------|
 | **agent** | コンテキスト取得・オブザベーション記録など（Canonical Knowledge は変更不可） | 6 ツール（compile, observe, audit, known_tags, workspace_status, detect） |
+| **ssa**（任意） | speck-serena-aegis の運用向け: 文書の同期・オブザベーションの処理と書庫入れ・プロポーザルの一覧／取得／承認・統計（取り込み・テンプレート更新・却下・バンドル承認は不可） | 13 ツール（共通 6 + 7） |
 | **admin** | 初期化・承認・トリアージ | 24 ツール（共通 6 + Admin 専用 18） |
 
 > agent surface だけでは初期化もプロポーザル承認もできません。この分離により、AI エージェントが人間の承認なしにアーキテクチャルールを変更することを防ぎます。（[INV-6](docs/technical-guide.ja.md)）
@@ -187,7 +188,7 @@ aegis_import_doc({
 aegis_sync_docs()   # コンテンツハッシュで変更を検知し、update_doc プロポーザルを作成
 ```
 
-`aegis_import_doc` と `aegis_sync_docs` はいずれも **admin** surface が必要です。詳細な一括インポート手順は `aegis-bulk-import` skill（`deploy-adapters` でデプロイ）を参照してください。
+`aegis_import_doc` は **admin** surface が必要です。`aegis_sync_docs` は **admin** と **ssa** の surface で使えます。詳細な一括インポート手順は `aegis-bulk-import` skill（`deploy-adapters` でデプロイ）を参照してください。
 
 ### 4. オブザベーションを報告
 
@@ -381,6 +382,20 @@ HuggingFace URI を直接指定することも可能: `--model hf:user/repo:file
 | `aegis_workspace_status` | 読み取り専用のワークスペーススナップショット（最近のコンパイル領域、未解決 compile_miss、保留プロポーザル数、reconcile バックログ（hash-sync/anchor-sync/semantic-review）） |
 | `aegis_init_detect` | プロジェクト分析と初期化プレビュー生成 |
 
+### MCP ツール — SSA Surface（追加 7 ツール、計 13）
+
+speck-serena-aegis（ssa）の運用向けの任意の surface です。agent の 6 ツールに、次の 7 ツールを足して登録します。7 ツールの振る舞いは admin surface と同じです。[ADR-020](docs/adr/020-ssa-surface.md) を参照してください。
+
+| ツール | 説明 |
+|--------|------|
+| `aegis_list_proposals` | プロポーザル一覧（ステータスフィルタ付き） |
+| `aegis_get_proposal` | プロポーザル詳細とエビデンスの取得 |
+| `aegis_approve_proposal` | 保留中のプロポーザルを承認 |
+| `aegis_archive_observations` | 古いオブザベーションをアーカイブ |
+| `aegis_get_stats` | ナレッジ集計とヘルスシグナル |
+| `aegis_process_observations` | 未分析のオブザベーションに対して分析パイプラインを実行 |
+| `aegis_sync_docs` | ファイルアンカー済みドキュメントをソースファイルと同期（reconcile-mode-aware: hash-sync, anchor-sync, semantic-review） |
+
 ### MCP ツール — Admin Surface（追加 18 ツール、計 24）
 
 | ツール | 説明 |
@@ -457,7 +472,7 @@ npx @fuwasegu/aegis --list-models                           # 利用可能な SL
 
 | フラグ | デフォルト | 説明 |
 |--------|-----------|------|
-| `--surface` | `agent` | `agent` または `admin` |
+| `--surface` | `agent` | `agent`・`ssa`・`admin` のいずれか |
 | `--db` | `.aegis/aegis.db` | SQLite データベースパス |
 | `--templates` | `./templates` | 同梱テンプレートディレクトリ |
 | `--template-dir` | | 追加テンプレート検索パス（ローカルが同梱を上書き） |
