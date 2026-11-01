@@ -203,12 +203,18 @@ function emptyExpandedTaggingAudit(): ExpandedTaggingAudit {
   };
 }
 
+const NOT_INSTALLED_NOTICE =
+  'Aegis is not installed in this project (no .aegis/ directory). ' +
+  'The knowledge base is empty and changes are not persisted. ' +
+  'Create .aegis/ and restart the MCP server to install.';
+
 export class ContextCompiler {
   constructor(
     private repo: Repository,
     private tagger: IntentTagger | null = null,
     private adapterOutdated = false,
     private shareNoticeProvider: (() => string | null) | null = null,
+    private notInstalled = false,
   ) {}
 
   private fillExpandedFromTagNames(
@@ -425,6 +431,9 @@ export class ContextCompiler {
     }
 
     const notices: string[] = [];
+    if (this.notInstalled) {
+      notices.push(NOT_INSTALLED_NOTICE);
+    }
     if (this.adapterOutdated) {
       notices.push('Aegis adapter templates may be outdated. Run `npx @fuwasegu/aegis deploy-adapters` to update.');
     }
@@ -922,7 +931,8 @@ export class ContextCompiler {
       knowledge_version: 0,
       base: { documents: [], resolution_path: [], templates: [] },
       warnings,
-      notices: [],
+      // An uninitialized DB takes this path, which is exactly the not-installed case (in-memory DB).
+      notices: this.notInstalled ? [NOT_INSTALLED_NOTICE] : [],
     };
   }
 }

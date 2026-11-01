@@ -19,6 +19,8 @@ Aegis is an MCP server that enforces architecture guidelines on AI coding agents
 
 The database is stored at `.aegis/aegis.db` in the project root. The `.aegis/` directory includes its own `.gitignore` — no manual configuration needed.
 
+The MCP server opens (and creates) this database only when `.aegis/` already exists under the project root, or when `--db` is given. Otherwise it runs with an empty in-memory database, persists nothing, and reports "not installed" on stderr and in the `notices` of `aegis_compile_context`. To install Aegis in a project, run `mkdir .aegis` and restart the MCP server.
+
 ## Installation
 
 **Requirements**: Node.js 26 or later.

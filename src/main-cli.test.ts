@@ -3,7 +3,7 @@
  * `pnpm test` runs `build` first (see package.json), so dist exists.
  */
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1054,4 +1054,56 @@ describe('CLI — staleness-ack (dist/main.js)', () => {
     expect(JSON.parse(r.stdout)).toMatchObject({ dry_run: false, skipped: [], archived_observations: 0 });
     expect(await readBaseline()).toContain('src/a.ts');
   }, 30_000);
+});
+
+describe('MCP server startup — DB creation gate (dist/main.js)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'aegis-startup-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Spawns the agent-surface server, waits for the startup line on stderr, kills it, and returns stderr. */
+  function startAndKill(projectRoot: string): Promise<string> {
+    return new Promise((resolvePromise, reject) => {
+      const child = spawn(execPath, [MAIN_JS, '--surface', 'agent', '--project-root', projectRoot], {
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      let stderr = '';
+      let settled = false;
+      const finish = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        child.kill('SIGKILL');
+        if (err) reject(err);
+        else resolvePromise(stderr);
+      };
+      const timer = setTimeout(() => finish(new Error(`startup timeout; stderr: ${stderr}`)), 12_000);
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+        if (stderr.includes('Aegis MCP server started')) finish();
+      });
+      child.on('error', (e) => finish(e));
+      child.on('exit', () => finish(new Error(`exited before startup; stderr: ${stderr}`)));
+    });
+  }
+
+  it('does not create .aegis/ and reports "not installed" when .aegis/ is absent', async () => {
+    const stderr = await startAndKill(dir);
+    expect(stderr).toContain('not installed');
+    expect(existsSync(join(dir, '.aegis'))).toBe(false);
+  }, 15_000);
+
+  it('creates aegis.db and .gitignore when .aegis/ already exists', async () => {
+    mkdirSync(join(dir, '.aegis'));
+    const stderr = await startAndKill(dir);
+    expect(stderr).not.toContain('not installed');
+    expect(existsSync(join(dir, '.aegis', 'aegis.db'))).toBe(true);
+    expect(existsSync(join(dir, '.aegis', '.gitignore'))).toBe(true);
+  }, 15_000);
 });

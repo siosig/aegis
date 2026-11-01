@@ -63,7 +63,7 @@ import {
   shareMaterialize,
   shareSourceExport,
 } from './core/project-share/index.js';
-import { createDatabase } from './core/store/database.js';
+import { createDatabase, createInMemoryDatabase } from './core/store/database.js';
 import { runInitialBaselineSourcePathMigration } from './core/store/migrations/index.js';
 import { Repository } from './core/store/repository.js';
 import type { IntentTagger } from './core/tagging/tagger.js';
@@ -131,6 +131,8 @@ const DEFAULT_DB_PATH = join(DEFAULT_DB_DIR, 'aegis.db');
 interface CliArgs {
   surface: Surface;
   dbPath: string;
+  /** True when `--db` was given explicitly. */
+  dbPathExplicit: boolean;
   templatesRoot: string;
   extraTemplateDirs: string[];
   projectRoot: string;
@@ -208,6 +210,7 @@ function parseArgs(): CliArgs {
   return {
     surface,
     dbPath: resolvedDbPath,
+    dbPathExplicit: dbPath !== undefined,
     templatesRoot,
     extraTemplateDirs,
     projectRoot,
@@ -1165,15 +1168,29 @@ async function main() {
 
   const { surface, dbPath, templatesRoot, projectRoot } = cliArgs;
 
-  // Ensure DB directory exists, with self-contained .gitignore
-  const dbDir = join(dbPath, '..');
-  mkdirSync(dbDir, { recursive: true });
-  const gitignorePath = join(dbDir, '.gitignore');
-  if (!existsSync(gitignorePath)) {
-    writeFileSync(gitignorePath, '*\n');
-  }
+  // The plugin starts this server in every cwd. Without an explicit --db, only open/create
+  // the default DB when .aegis/ already exists; otherwise run on an empty in-memory DB and
+  // leave the project untouched (ADR-019).
+  const notInstalled = !cliArgs.dbPathExplicit && !existsSync(join(projectRoot, DEFAULT_DB_DIR));
 
-  const db = await createDatabase(dbPath);
+  let db: Awaited<ReturnType<typeof createDatabase>>;
+  if (notInstalled) {
+    console.error(
+      `[aegis] ${join(projectRoot, DEFAULT_DB_DIR)}/ not found: Aegis is not installed in this project. ` +
+        'Using an empty in-memory database; nothing is persisted. ' +
+        'Create the .aegis/ directory and restart the MCP server to install.',
+    );
+    db = await createInMemoryDatabase();
+  } else {
+    // Ensure DB directory exists, with self-contained .gitignore
+    const dbDir = join(dbPath, '..');
+    mkdirSync(dbDir, { recursive: true });
+    const gitignorePath = join(dbDir, '.gitignore');
+    if (!existsSync(gitignorePath)) {
+      writeFileSync(gitignorePath, '*\n');
+    }
+    db = await createDatabase(dbPath);
+  }
   const repo = new Repository(db);
   const tagger = await createTagger(cliArgs);
 
@@ -1198,6 +1215,7 @@ async function main() {
     cliArgs.extraTemplateDirs,
     adapterOutdated,
     projectRoot,
+    notInstalled,
   );
   const server = createAegisServer(service, surface);
 

@@ -142,6 +142,13 @@ describe('AegisService — Surface Authorization', () => {
     // Uninitialized — should return warnings but not throw
     const result = await service.compileContext({ target_files: ['src/a.ts'] }, 'agent');
     expect(result.warnings.length).toBeGreaterThan(0);
+    expect(result.notices.some((n) => n.includes('not installed'))).toBe(false);
+  });
+
+  it('compile_context reports a not-installed notice when constructed with notInstalled=true', async () => {
+    const notInstalledService = new AegisService(repo, TEMPLATES_ROOT, null, [], false, process.cwd(), true);
+    const result = await notInstalledService.compileContext({ target_files: ['src/a.ts'] }, 'agent');
+    expect(result.notices[0]).toContain('not installed');
   });
 
   it('agent surface can call observe', () => {
