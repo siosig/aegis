@@ -624,6 +624,138 @@ describe('approvePendingProposals: update_doc selection', () => {
   });
 });
 
+describe('approvePendingProposals: duplicate add_edge', () => {
+  let fx: Fixture;
+  let projectRoot: string;
+
+  beforeEach(async () => {
+    fx = await createFixture();
+    projectRoot = mkdtempSync(join(tmpdir(), 'aegis-approve-pending-dup-'));
+    seedBaseKnowledge(fx);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(projectRoot, { recursive: true, force: true });
+  });
+
+  /** Inserts an add_edge proposal whose evidence is an already-analyzed document_import observation. */
+  function insertEdge(id: string, edgeId: string, sourceValue: string, createdAt: string): void {
+    const obsId = `obs-${id}`;
+    fx.repo.insertObservation({
+      observation_id: obsId,
+      event_type: 'document_import',
+      payload: '{}',
+      related_compile_id: null,
+      related_snapshot_id: null,
+    });
+    fx.db.prepare('UPDATE observations SET analyzed_at = ? WHERE observation_id = ?').run(createdAt, obsId);
+    insertPending(fx, id, 'add_edge', addEdgePayload(edgeId, 'base-doc', sourceValue), createdAt);
+    fx.repo.insertProposalEvidence(id, obsId);
+  }
+
+  function insertFiveDuplicates(): void {
+    for (let i = 1; i <= 5; i++) {
+      insertEdge(`p-dup${i}`, `e-dup${i}`, 'app/**', `2026-01-01T00:00:0${i}.000Z`);
+    }
+  }
+
+  it('rejects an add_edge that collides with an approved edge as duplicate_edge', () => {
+    insertEdge('p-dup', 'e-dup', 'app/**', '2026-01-01T00:00:01.000Z');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved).toEqual([]);
+    expect(result.failed).toEqual([]);
+    expect(result.rejected.map((i) => [i.proposal_id, i.reason])).toEqual([['p-dup', 'duplicate_edge']]);
+    expect(result.rejected[0].detail).toContain('e-base');
+    expect(statusOf(fx, 'p-dup')).toBe('rejected');
+    expect(fx.repo.getProposal('p-dup')?.review_comment).toContain('duplicate_edge');
+    // Evidence stays analyzed so the next maintenance run does not recreate the proposal.
+    expect(fx.repo.getObservation('obs-p-dup')?.analyzed_at).not.toBeNull();
+    expect(canonicalEdges(fx).map((e) => e.edge_id)).not.toContain('e-dup');
+  });
+
+  it('dry-run reports would_reject for a colliding add_edge and leaves it pending', () => {
+    insertEdge('p-dup', 'e-dup', 'app/**', '2026-01-01T00:00:01.000Z');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: true, types: null }, projectRoot);
+
+    expect(result.would_approve).toEqual([]);
+    expect(result.would_reject.map((i) => [i.proposal_id, i.reason])).toEqual([['p-dup', 'duplicate_edge']]);
+    expect(result.would_reject[0].detail).toContain('e-base');
+    expect(result.rejected).toEqual([]);
+    expect(pendingIds(fx)).toEqual(['p-dup']);
+  });
+
+  it('approves an add_edge whose routing key differs from every approved edge', () => {
+    insertEdge('p-other', 'e-other', 'lib/**', '2026-01-01T00:00:01.000Z');
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved.map((i) => i.proposal_id)).toEqual(['p-other']);
+    expect(result.rejected).toEqual([]);
+    expect(canonicalEdges(fx).map((e) => e.edge_id)).toContain('e-other');
+  });
+
+  it('approves the first of five add_edges for a new key and rejects the other four', () => {
+    insertFiveDuplicates();
+    // Same key as the five proposals, but not yet approved: the first one is approved, the rest collide with it.
+    fx.db.prepare("UPDATE proposals SET payload = REPLACE(payload, 'app/**', 'srv/**')").run();
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved.map((i) => i.proposal_id)).toEqual(['p-dup1']);
+    expect(result.rejected.map((i) => [i.proposal_id, i.reason])).toEqual([
+      ['p-dup2', 'duplicate_edge'],
+      ['p-dup3', 'duplicate_edge'],
+      ['p-dup4', 'duplicate_edge'],
+      ['p-dup5', 'duplicate_edge'],
+    ]);
+    expect(result.rejected.every((i) => i.detail.includes('e-dup1'))).toBe(true);
+    expect(result.failed).toEqual([]);
+    expect(fx.repo.listProposals('pending', 10).total).toBe(0);
+  });
+
+  it('dry-run classifies the same five add_edges as one would_approve and four would_reject', () => {
+    insertFiveDuplicates();
+    fx.db.prepare("UPDATE proposals SET payload = REPLACE(payload, 'app/**', 'srv/**')").run();
+
+    const result = approvePendingProposals(fx.repo, { dryRun: true, types: null }, projectRoot);
+
+    expect(result.would_approve.map((i) => i.proposal_id)).toEqual(['p-dup1']);
+    expect(result.would_reject.map((i) => i.proposal_id)).toEqual(['p-dup2', 'p-dup3', 'p-dup4', 'p-dup5']);
+    expect(result.would_reject.every((i) => i.detail.includes('e-dup1'))).toBe(true);
+    expect(result.rejected).toEqual([]);
+    expect(pendingIds(fx)).toHaveLength(5);
+  });
+
+  it('rejects all five add_edges when they collide with an approved edge', () => {
+    insertFiveDuplicates();
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.approved).toEqual([]);
+    expect(result.rejected).toHaveLength(5);
+    expect(result.rejected.every((i) => i.reason === 'duplicate_edge' && i.detail.includes('e-base'))).toBe(true);
+    expect(result.failed).toEqual([]);
+  });
+
+  it('does not reject a colliding add_edge while a pending remove_edge targets the approved edge', () => {
+    insertEdge('p-dup', 'e-dup', 'app/**', '2026-01-01T00:00:01.000Z');
+    insertPending(fx, 'p-rm', 'remove_edge', { edge_id: 'e-base' }, '2026-01-01T00:00:02.000Z');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const result = approvePendingProposals(fx.repo, { dryRun: false, types: null }, projectRoot);
+
+    expect(result.rejected).toEqual([]);
+    expect(result.failed.map((i) => i.proposal_id)).toEqual(['p-dup']);
+    expect(result.approved.map((i) => i.proposal_id)).toEqual(['p-rm']);
+    expect(statusOf(fx, 'p-dup')).toBe('pending');
+    expect(errorSpy).toHaveBeenCalled();
+  });
+});
+
 // (11)
 describe('parseProposalTypesOption', () => {
   it('parses a comma-separated list in the given order', () => {

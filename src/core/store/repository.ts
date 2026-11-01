@@ -1947,6 +1947,13 @@ export class Repository {
     this._invalidateStalenessBaselinesForPathEdge(payload, [payload.target_doc_id]);
   }
 
+  /** The approved edge that `add_edge` approval of `edge` would collide with (same routing key, other edge_id). */
+  findConflictingApprovedEdge(
+    edge: Pick<Edge, 'edge_id' | 'source_type' | 'source_value' | 'target_doc_id' | 'edge_type'>,
+  ): Edge | undefined {
+    return this._findConflictingApprovedEdge(edge.edge_id, edge);
+  }
+
   /**
    * Another approved edge (excluding `excludeEdgeId`) with the same routing key is a duplicate.
    */

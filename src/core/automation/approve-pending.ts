@@ -8,8 +8,15 @@
  * update_doc: per doc_id only the newest proposal is a candidate. Older ones are rejected as
  * `superseded`. The newest one is rejected as `stale_content` when the document resolves to a
  * whole-file source anchor whose current file content differs from the proposed content
- * (approving it would roll the document back to an older version). Rejections keep the evidence
- * observations analyzed so the next maintenance run does not recreate the same proposals.
+ * (approving it would roll the document back to an older version).
+ *
+ * add_edge: a proposal whose routing key (source_type, source_value, target_doc_id, edge_type) matches an
+ * approved edge is rejected as `duplicate_edge` (approving it can only fail). Within one run, the check
+ * runs right before each approval, so an add_edge approved earlier in the same run counts as approved.
+ * It is not rejected while a pending remove_edge / retarget_edge / deprecate still targets the conflicting edge.
+ *
+ * Rejections keep the evidence observations analyzed so the next maintenance run does not recreate the
+ * same proposals.
  */
 
 import { createHash } from 'node:crypto';
@@ -17,7 +24,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolveSourcePath } from '../paths.js';
 import { primaryAssetPathForHashSync } from '../source-refs.js';
 import type { Repository } from '../store/repository.js';
-import type { CanonicalVersion, Proposal, ProposalType } from '../types.js';
+import type { CanonicalVersion, Edge, EdgeSourceType, EdgeType, Proposal, ProposalType } from '../types.js';
 
 /** Approval order (first to last). Within a type: created_at ASC, then proposal_id ASC. */
 export const APPROVE_PENDING_TYPE_ORDER: readonly ProposalType[] = [
@@ -72,7 +79,7 @@ export interface ApprovePendingSkipped extends ApprovePendingItem {
 }
 
 export interface ApprovePendingRejected extends ApprovePendingItem {
-  reason: 'superseded' | 'stale_content';
+  reason: 'superseded' | 'stale_content' | 'duplicate_edge';
   detail: string;
 }
 
@@ -91,7 +98,7 @@ export interface ApprovePendingResult {
   selected: number;
   approved: ApprovePendingApproved[]; // [] on dry run
   would_approve: ApprovePendingItem[]; // non-empty only on dry run, in processing order
-  /** update_doc proposals rejected as superseded / stale_content. [] on dry run. */
+  /** Proposals rejected as superseded / stale_content (update_doc) or duplicate_edge (add_edge). [] on dry run. */
   rejected: ApprovePendingRejected[];
   /** Same classification as `rejected`, non-empty only on dry run (the DB is not modified). */
   would_reject: ApprovePendingRejected[];
@@ -256,6 +263,85 @@ function classifyUpdateDocs(repo: Repository, ordered: Proposal[], projectRoot: 
   return rejections;
 }
 
+type EdgeKey = Pick<Edge, 'edge_id' | 'source_type' | 'source_value' | 'target_doc_id' | 'edge_type'>;
+
+function parseEdgePayload(proposal: Proposal): EdgeKey | null {
+  if (proposal.proposal_type !== 'add_edge') return null;
+  const payload = parsePayload(proposal.payload);
+  if (payload === null) return null;
+  const edge_id = asString(payload.edge_id);
+  const source_type = asString(payload.source_type);
+  const source_value = asString(payload.source_value);
+  const target_doc_id = asString(payload.target_doc_id);
+  const edge_type = asString(payload.edge_type);
+  if (
+    edge_id === null ||
+    source_type === null ||
+    source_value === null ||
+    target_doc_id === null ||
+    edge_type === null
+  ) {
+    return null;
+  }
+  return {
+    edge_id,
+    source_type: source_type as EdgeSourceType,
+    source_value,
+    target_doc_id,
+    edge_type: edge_type as EdgeType,
+  };
+}
+
+function routingKey(edge: EdgeKey): string {
+  return JSON.stringify([edge.source_type, edge.source_value, edge.target_doc_id, edge.edge_type]);
+}
+
+/** edge_ids that a pending remove_edge / retarget_edge / deprecate(edge) proposal will change (regardless of --types). */
+function edgesTargetedByPending(repo: Repository): Set<string> {
+  const ids = new Set<string>();
+  for (const p of repo.listPendingProposalsOrdered(['remove_edge', 'retarget_edge', 'deprecate'])) {
+    const payload = parsePayload(p.payload);
+    if (payload === null) continue;
+    if (p.proposal_type === 'deprecate') {
+      if (payload.entity_type === 'edge' && typeof payload.entity_id === 'string') ids.add(payload.entity_id);
+    } else if (typeof payload.edge_id === 'string') {
+      ids.add(payload.edge_id);
+    }
+  }
+  return ids;
+}
+
+interface DuplicateEdgeContext {
+  repo: Repository;
+  protectedEdgeIds: Set<string>;
+  /** Dry run only: routing key -> edge_id of add_edge proposals already counted as would_approve in this run. */
+  plannedEdges: Map<string, string>;
+}
+
+/**
+ * Rejection for an add_edge that collides with an approved edge as of now (or, on dry run, with an earlier
+ * would_approve add_edge of the same run). null when it may be approved or when the conflict may be resolved
+ * by a pending remove_edge / retarget_edge / deprecate.
+ */
+function duplicateEdgeRejection(ctx: DuplicateEdgeContext, proposal: Proposal): Rejection | null {
+  const edge = parseEdgePayload(proposal);
+  if (edge === null) return null;
+  const label = `${edge.source_type}:${edge.source_value} -> ${edge.target_doc_id} (${edge.edge_type})`;
+  const approved = ctx.repo.findConflictingApprovedEdge(edge);
+  if (approved !== undefined) {
+    if (ctx.protectedEdgeIds.has(approved.edge_id)) return null;
+    return { reason: 'duplicate_edge', detail: `approved edge ${approved.edge_id} already exists for ${label}` };
+  }
+  const planned = ctx.plannedEdges.get(routingKey(edge));
+  if (planned !== undefined) {
+    return {
+      reason: 'duplicate_edge',
+      detail: `edge ${planned} approved earlier in this run already exists for ${label}`,
+    };
+  }
+  return null;
+}
+
 function noLongerPending(repo: Repository, item: ApprovePendingItem): ApprovePendingSkipped | null {
   const fresh = repo.getProposal(item.proposal_id);
   if (fresh !== undefined && fresh.status === 'pending') return null;
@@ -311,8 +397,8 @@ function applyDecision(
 }
 
 /**
- * Skips bundled proposals, rejects superseded / stale update_doc proposals, and approves the rest
- * in order via repo.approveProposal(id, undefined, projectRoot).
+ * Skips bundled proposals, rejects superseded / stale update_doc proposals and duplicate add_edge
+ * proposals, and approves the rest in order via repo.approveProposal(id, undefined, projectRoot).
  */
 export function approvePendingProposals(
   repo: Repository,
@@ -328,6 +414,11 @@ export function approvePendingProposals(
     .sort((a, b) => typeIndex(a.p.proposal_type) - typeIndex(b.p.proposal_type) || a.i - b.i)
     .map(({ p }) => p);
   const rejections = classifyUpdateDocs(repo, proposals, projectRoot);
+  const duplicateCtx: DuplicateEdgeContext = {
+    repo,
+    protectedEdgeIds: edgesTargetedByPending(repo),
+    plannedEdges: new Map(),
+  };
 
   const out: Buckets = { approved: [], would_approve: [], rejected: [], would_reject: [], skipped: [], failed: [] };
   for (const proposal of proposals) {
@@ -340,10 +431,16 @@ export function approvePendingProposals(
       });
       continue;
     }
-    const rejection = rejections.get(proposal.proposal_id);
+    const rejection =
+      rejections.get(proposal.proposal_id) ?? duplicateEdgeRejection(duplicateCtx, proposal) ?? undefined;
     if (options.dryRun) {
-      if (rejection !== undefined) out.would_reject.push({ ...item, ...rejection });
-      else out.would_approve.push(item);
+      if (rejection !== undefined) {
+        out.would_reject.push({ ...item, ...rejection });
+      } else {
+        out.would_approve.push(item);
+        const edge = parseEdgePayload(proposal);
+        if (edge !== null) duplicateCtx.plannedEdges.set(routingKey(edge), edge.edge_id);
+      }
       continue;
     }
     applyDecision(repo, item, rejection, projectRoot, out);

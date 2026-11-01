@@ -510,6 +510,7 @@ admin だけの MCP ツール 9 本に当たるサブコマンドである。入
 - `approve-pending` は pending の提案を `bootstrap → new_doc → update_doc → add_edge → retarget_edge → remove_edge → deprecate → materialize` の順（同じ種別の中は作成順）に、1 件ずつ別のトランザクションで承認する。途中で失敗しても成功した承認は残る。
   - `bundle_id` のある提案は承認せず `reason: "bundled"` で `skipped` に入れる。
   - 同じ文書への `update_doc` が複数あるときは、最新の 1 件だけを候補にし、古いものを `reason: "superseded"` で却下する。最新の 1 件も、本文がソースファイルの全体と一致しなければ `reason: "stale_content"` で却下する。ソースファイルの無い文書は比較せずに承認する。
+  - 承認済みのエッジと経路のキー（`source_type`・`source_value`・`target_doc_id`・`edge_type`）が同じ `add_edge` は、`reason: "duplicate_edge"` で却下する（`detail` に衝突先の `edge_id`）。同じ実行内で先に承認した `add_edge` とも衝突を見る（`--dry-run` では先に `would_approve` へ入れたものと見る）。衝突先を pending の `remove_edge`・`retarget_edge`・`deprecate`（エッジ）が変える予定のときは却下せず、承認を試みる。
   - 処理中に pending でなくなった提案は `reason: "no_longer_pending"` で `skipped` に入れ、失敗に数えない。
   - 出力の JSON は `approved`・`would_approve`・`rejected`・`would_reject`・`skipped`・`failed` を持つ。`--dry-run` では書き込まない。
   - MCP のツールとしては公開しない。

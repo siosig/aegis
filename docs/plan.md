@@ -73,7 +73,7 @@ flowchart LR
 3. 分析器は種別ごとの固定の登録表で選ぶ。`compile_miss` は `CoverageAnalyzer`（中で `RuleBasedAnalyzer` と文書分割の判定を使う）、`review_correction`・`pr_merged`・`manual_note`・`document_import` はそれぞれ専用の分析器である。`doc_gap_detected` と `staleness_detected` の分析器は提案を作らない。
 4. `ProposeService` は提案を `pending` で作り、pending の提案全体に対して意味のキーで重複を除き、提案と根拠の対応を 1 トランザクションで書く。
 5. 承認（`_approveProposalInTransaction`）は、pending でない提案とバンドルに属する提案（単独の承認のとき）を拒否し、修正を当て、`source_path` を正規化し、変更を適用し、状態を `approved` にし、`knowledge_version` を 1 増やし、snapshot を作る。ここまでを 1 トランザクションで行う。
-6. 却下は根拠の Observation の `analyzed_at` を戻して再分析できるようにする。`approve-pending` の却下（`superseded`・`stale_content`）だけは戻さない。戻すと同じ提案がまた作られるからである。
+6. 却下は根拠の Observation の `analyzed_at` を戻して再分析できるようにする。`approve-pending` の却下（`superseded`・`stale_content`・`duplicate_edge`）だけは戻さない。戻すと同じ提案がまた作られるからである。
 
 ### P-3 の例外として残す経路
 
@@ -133,6 +133,7 @@ sequenceDiagram
 - 判断: 一括承認（`approve-pending`）は CLI 専用にし、MCP のツールにしない。`AegisService.approvePending` も `assertSurfaceAllows` を通す（ssa・agent では `SurfaceViolationError`）。種別の順（`bootstrap → new_doc → update_doc → add_edge → retarget_edge → remove_edge → deprecate → materialize`）に 1 件ずつ `repo.approveProposal` を呼び、1 件ごとに 1 トランザクションと 1 snapshot を作る。失敗は `process.exitCode = 1` で返し、`process.exit()` は呼ばない（ADR-019 D-3）。
 - 理由: AI エージェントが承認のために MCP を呼ぶ回数を 0 にしつつ、承認を人の手元の操作に保つためである。部分成功を残す要件があるので、全体を 1 トランザクションにはしない。`process.exit()` はパイプに流した stdout の JSON を途中で切る。
 - 同じ文書への `update_doc` は最新だけを候補にし、ソースファイルの全体と本文が違えば `stale_content` で却下する。`document_import` から作った `update_doc` は観測した時点の本文を持つので、古い観測からの提案を順に承認すると、文書が現在のファイルより古い本文に戻る（2026-11-01 に実際に起きた）。却下では根拠の Observation を再分析の対象に戻さない。戻すと次の `maintenance` が同じ古い提案を作り直す。
+- 承認済みのエッジと経路のキー（`source_type`・`source_value`・`target_doc_id`・`edge_type`）が同じ `add_edge` は、承認が必ず失敗するので `duplicate_edge` で却下する（`reanalyzeEvidence: false`）。`document_import` の analyzer は承認済みエッジとの重複を除かない（`propose.ts` が除くのは pending 同士だけ）ので、`reject-proposal`（観測を未分析に戻す）では同じ提案が作り直され、却下も承認もできないまま pending が残って `materialize` を止める。判定は承認の直前にその時点の DB に対して行う。同じ実行内で先に承認した `add_edge` とも衝突を見られ、先の承認が失敗したときは後ろを巻き込まない。`--dry-run` は DB が変わらないので、先に `would_approve` に入れた `add_edge` のキーを覚えて同じ分類にする。衝突先のエッジを pending の `remove_edge`・`retarget_edge`・`deprecate`（エッジ）が変える予定のときは却下せず、従来どおり承認を試みる（失敗なら pending のまま残り、衝突先が消えた後に承認できる）。
 - 判断: コードだけが変わったことによる Level 3 の指摘は、エッジを変えても消えない。人が文書とコードを照らして確かめた後に、admin 専用の CLI `staleness-ack` で確定する。確定は 2 段で行う。まず現在の Level 3 の指摘を数え、次に基準値なしとして取り直す。基準値の書き込みと Level 3 の Observation のアーカイブは 1 トランザクションで行う（ADR-019 D-1）。
 - 理由: `maintenance` はドリフトの無い回にしか基準値を書き直さないので、確定の操作が無いと指摘が永久に残る。Observation もアーカイブしないと、重複除去によって同じ指摘が二度と記録されない。
 - 元に戻さないこと: どちらも MCP のツールにしない。`aegis_approve_proposal` に配列の引数を足す形でも一括承認を MCP に出さない。バンドルに属する提案は一括承認に混ぜず、全部か無しかの `aegis_approve_proposal_bundle` に任せる。
