@@ -368,6 +368,19 @@ describe('AegisDatabase safe persistence (clobber regression)', () => {
     expect(new Repository(db2).getApprovedDocuments()).toHaveLength(1);
   });
 
+  it('persist replaces the DB file by rename (new inode), never by an in-place overwrite', async () => {
+    const db = await createDatabase(dbPath);
+    const repo = new Repository(db);
+    const inodeBefore = statSync(dbPath).ino;
+
+    insertApprovedDoc(repo, 'doc-a', 'Doc A');
+
+    // The temp file coexists with the old file until the rename, so its inode is necessarily different.
+    // An in-place writeFileSync(dbPath) would keep the old inode.
+    expect(statSync(dbPath).ino).not.toBe(inodeBefore);
+    expect(readdirSync(tmpDir).filter((f) => f.includes('.tmp-'))).toEqual([]);
+  });
+
   it('a truncated (empty) file under a live instance does not wipe in-memory state', async () => {
     const db = await createDatabase(dbPath);
     const repo = new Repository(db);
