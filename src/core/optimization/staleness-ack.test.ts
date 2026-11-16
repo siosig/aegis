@@ -63,6 +63,7 @@ function scan(repo: Repository, root: string): ReturnType<typeof collectSemantic
     projectRoot: root,
     getBaseline: (id) => repo.getStalenessBaseline(id),
     persistLevel3Baselines: true,
+    excludedLinkedPaths: new Set(),
   });
 }
 
@@ -182,5 +183,100 @@ describe('acknowledgeStaleness (CLI staleness-ack)', () => {
   it('is admin-only on the service', () => {
     const service = new AegisService(repo, join(import.meta.dirname, '../../../templates'), null, [], false, root);
     expect(() => service.ackStaleness({ docIds: null, dryRun: true }, 'agent')).toThrow(SurfaceViolationError);
+  });
+});
+
+function gitCommitAll(cwd: string, message: string): string {
+  const run = (...args: string[]): string =>
+    execFileSync(
+      'git',
+      ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args],
+      { cwd, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim();
+  run('add', '-A');
+  run('commit', '-q', '-m', message);
+  return run('rev-parse', 'HEAD');
+}
+
+describe('acknowledgeStaleness with onlyAttributable (post-commit acknowledgement)', () => {
+  let root: string;
+  let db: AegisDatabase;
+  let repo: Repository;
+  let c0: string;
+
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), 'aegis-stale-ack-attr-'));
+    writeFiles(root, {
+      'src/a.ts': 'export function A() {}\n',
+      'lib/b.ts': 'export function B() {}\n',
+    });
+    execFileSync('git', ['init', '-q'], { cwd: root, stdio: 'ignore' });
+    c0 = gitCommitAll(root, 'c0');
+    db = await createInMemoryDatabase();
+    repo = new Repository(db);
+    bootstrap(repo);
+    for (const u of scan(repo, root).baselineUpserts) repo.upsertStalenessBaseline(u.doc_id, u.fingerprint_json);
+
+    // doc-a drifts in the committed range; doc-b drifts in the range and again in the working tree.
+    writeFiles(root, {
+      'src/a.ts': 'export function A() {}\nexport function A2() {}\n',
+      'lib/b.ts': 'export function B2() {}\n',
+    });
+    gitCommitAll(root, 'c1');
+    writeFiles(root, { 'lib/b.ts': 'export function B3() {}\n' });
+    observe(repo, 'o-a3', 'doc-a', 3, 'symbol_drift');
+    observe(repo, 'o-b3', 'doc-b', 3, 'symbol_drift');
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('acknowledges only documents whose every Level-3 finding the range explains', () => {
+    const baselineB = repo.getStalenessBaseline('doc-b');
+
+    const result = acknowledgeStaleness(repo, root, {
+      docIds: null,
+      dryRun: false,
+      onlyAttributable: { baseRef: c0, headRef: 'HEAD' },
+    });
+
+    expect(result.acknowledged.map((a) => a.doc_id)).toEqual(['doc-a']);
+    expect(result.skipped).toEqual([
+      { doc_id: 'doc-b', reason: 'not_attributable' },
+      { doc_id: 'doc-c', reason: 'no_linked_paths' },
+    ]);
+    expect(result.archived_observations).toBe(1);
+    expect(repo.getStalenessBaseline('doc-b')).toBe(baselineB);
+    expect(archivedAt(db, 'o-b3')).toBeNull();
+    expect(scan(repo, root).findings.map((f) => f.doc_id)).toEqual(['doc-b']);
+  });
+
+  it('does not acknowledge drift that a commit before the range introduced', () => {
+    writeFiles(root, { 'lib/b.ts': 'export function B4() {}\n' });
+    gitCommitAll(root, 'c2');
+    // doc-a drifted in c1, which the range c2..HEAD does not contain: its baseline still holds the c0 state.
+    const result = acknowledgeStaleness(repo, root, {
+      docIds: ['doc-a'],
+      dryRun: true,
+      onlyAttributable: { baseRef: 'HEAD', headRef: 'HEAD' },
+    });
+    expect(result.acknowledged).toEqual([]);
+    expect(result.skipped).toEqual([{ doc_id: 'doc-a', reason: 'not_attributable' }]);
+  });
+
+  it('reports no_findings for a document whose files match its baseline', () => {
+    writeFiles(root, { 'src/a.ts': 'export function A() {}\n', 'lib/b.ts': 'export function B() {}\n' });
+    const result = acknowledgeStaleness(repo, root, {
+      docIds: ['doc-a', 'doc-b'],
+      dryRun: true,
+      onlyAttributable: { baseRef: 'HEAD', headRef: null },
+    });
+    expect(result.acknowledged).toEqual([]);
+    expect(result.skipped).toEqual([
+      { doc_id: 'doc-a', reason: 'no_findings' },
+      { doc_id: 'doc-b', reason: 'no_findings' },
+    ]);
   });
 });

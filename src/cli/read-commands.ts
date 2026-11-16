@@ -1,5 +1,5 @@
 /**
- * Shared skeleton for the read-only CLI subcommands (`edges`, `resolve`).
+ * Shared skeleton for the read-only CLI subcommands (`edges`, `resolve`, `staleness-report`).
  *
  * This layer parses subcommand arguments and runs them on top of `src/core/`.
  * It must not import `src/mcp/` (it does not go through `AegisService`), and
@@ -10,6 +10,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { DEFAULT_DB_DIR } from '../core/init/install-marker.js';
+import { buildStalenessReport } from '../core/optimization/staleness-report.js';
 import { InvalidTargetPathError, normalizeTargetPath } from '../core/paths.js';
 import { ContextCompiler } from '../core/read/compiler.js';
 import { buildEdgesOutput, buildResolveOutput, type ResolveTarget } from '../core/read/knowledge-query.js';
@@ -30,6 +31,16 @@ export interface ResolveCliOptions {
   projectRoot: string;
   dbPath: string;
   paths: string[];
+}
+
+export interface StalenessReportCliOptions {
+  projectRoot: string;
+  dbPath: string;
+  baseRef: string;
+  /** null = compare against the working tree. */
+  headRef: string | null;
+  /** null = every approved document. */
+  docIds: string[] | null;
 }
 
 export class CliUsageError extends Error {
@@ -160,6 +171,73 @@ export async function runResolveCli(args: string[], io: CliIo, cwd: string): Pro
     return 0;
   } catch (err) {
     io.stderr(`[aegis] resolve: ${formatErrorLine(err)}`);
+    return 2;
+  } finally {
+    db?.close();
+  }
+}
+
+const STALENESS_REPORT_OPTIONS = {
+  ...READ_COMMAND_OPTIONS,
+  'base-ref': { type: 'string' },
+  'head-ref': { type: 'string' },
+  'doc-ids': { type: 'string' },
+} as const;
+
+/** Parses `staleness-report` arguments; throws CliUsageError on any usage error. `--json` is accepted and ignored. */
+export function parseStalenessReportCli(args: string[], cwd: string): StalenessReportCliOptions {
+  let values: ReturnType<typeof parseArgs<{ options: typeof STALENESS_REPORT_OPTIONS }>>['values'];
+  try {
+    ({ values } = parseArgs({ args, options: STALENESS_REPORT_OPTIONS, strict: true, allowPositionals: false }));
+  } catch (err) {
+    throw new CliUsageError(formatErrorLine(err));
+  }
+  assertNonEmptyPathOptions(values);
+  const baseRef = values['base-ref'];
+  if (baseRef === undefined) throw new CliUsageError('--base-ref is required');
+  if (baseRef === '') throw new CliUsageError('--base-ref requires a non-empty value');
+  const headRef = values['head-ref'];
+  if (headRef === '') throw new CliUsageError('--head-ref requires a non-empty value');
+  let docIds: string[] | null = null;
+  if (values['doc-ids'] !== undefined) {
+    docIds = values['doc-ids']
+      .split(',')
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
+    if (docIds.length === 0) throw new CliUsageError('--doc-ids requires at least one doc_id');
+  }
+  return { ...resolveDbLocation(values, cwd), baseRef, headRef: headRef ?? null, docIds };
+}
+
+/**
+ * Runs `staleness-report`; returns the process exit code (0 or 2). Prints the Level-3 findings of each document
+ * with whether the commit range `--base-ref..--head-ref` (working tree when no head ref) explains them.
+ */
+export async function runStalenessReportCli(args: string[], io: CliIo, cwd: string): Promise<number> {
+  let options: StalenessReportCliOptions;
+  try {
+    options = parseStalenessReportCli(args, cwd);
+  } catch (err) {
+    io.stderr(`[aegis] staleness-report: ${err instanceof CliUsageError ? err.message : formatErrorLine(err)}`);
+    return 2;
+  }
+  const { dbPath } = options;
+  if (!existsSync(dbPath)) {
+    io.stderr(`[aegis] Database not found at ${dbPath}`);
+    return 2;
+  }
+  let db: AegisDatabase | undefined;
+  try {
+    db = await openDatabaseSnapshot(dbPath);
+    const output = buildStalenessReport(new Repository(db), options.projectRoot, {
+      docIds: options.docIds,
+      baseRef: options.baseRef,
+      headRef: options.headRef,
+    });
+    io.stdout(`${JSON.stringify(output, null, 2)}\n`);
+    return 0;
+  } catch (err) {
+    io.stderr(`[aegis] staleness-report: ${formatErrorLine(err)}`);
     return 2;
   } finally {
     db?.close();

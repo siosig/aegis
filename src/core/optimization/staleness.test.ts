@@ -8,6 +8,7 @@ import type { Document, Edge } from '../types.js';
 import {
   buildEdgeMatchers,
   collectSemanticStalenessFindings,
+  docSourcePathSet,
   extractTsExportedSymbols,
   FingerprintMemo,
   findRenameCandidatePath,
@@ -70,6 +71,7 @@ export interface Delta {}
       projectRoot: root,
       getBaseline: () => null,
       persistLevel3Baselines: false,
+      excludedLinkedPaths: new Set(),
     });
 
     expect(r.findings.some((f) => f.level === 1 && f.kind === 'hash_mismatch')).toBe(true);
@@ -108,6 +110,7 @@ export interface Delta {}
       projectRoot: root,
       getBaseline: () => null,
       persistLevel3Baselines: false,
+      excludedLinkedPaths: new Set(),
     });
 
     expect(r.findings.some((f) => f.kind === 'source_missing')).toBe(true);
@@ -167,6 +170,7 @@ export interface Delta {}
       projectRoot: root,
       getBaseline: (id) => (id === 'guide' ? prevJson : null),
       persistLevel3Baselines: false,
+      excludedLinkedPaths: new Set(),
     });
 
     expect(r.findings.some((f) => f.level === 3 && f.kind === 'symbol_drift')).toBe(true);
@@ -213,6 +217,7 @@ export interface Delta {}
       projectRoot: root,
       getBaseline: () => null,
       persistLevel3Baselines: true,
+      excludedLinkedPaths: new Set(),
     });
 
     expect(r.findings).toHaveLength(0);
@@ -261,6 +266,7 @@ export interface Delta {}
       projectRoot: root,
       getBaseline: () => baselineJson,
       persistLevel3Baselines: false,
+      excludedLinkedPaths: new Set(),
     });
 
     expect(r.findings.some((f) => f.level === 3 && f.paths?.includes('docs/a.md'))).toBe(true);
@@ -306,6 +312,7 @@ export interface Delta {}
       projectRoot: root,
       getBaseline: () => baselineJson,
       persistLevel3Baselines: false,
+      excludedLinkedPaths: new Set(),
     });
 
     expect(r.findings.some((f) => f.level === 3 && f.paths?.includes('docs/primary.md'))).toBe(true);
@@ -453,6 +460,7 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
       projectRoot: root,
       getBaseline: () => null,
       persistLevel3Baselines: true,
+      excludedLinkedPaths: new Set(),
     });
     expect(r.baselineUpserts.map((b) => b.doc_id).sort()).toEqual(['d1', 'd2']);
     expect(r.stats.fingerprints_computed).toBe(1);
@@ -477,6 +485,7 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
         projectRoot,
         getBaseline: () => staleBaseline,
         persistLevel3Baselines: true,
+        excludedLinkedPaths: new Set(),
       });
 
     const viaGit = run(gitRoot);
@@ -508,6 +517,7 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
           projectRoot: root,
           getBaseline: () => baselineJson,
           persistLevel3Baselines: true,
+          excludedLinkedPaths: new Set(),
         });
       return { root, run };
     }
@@ -549,6 +559,7 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
         projectRoot: root,
         getBaseline: () => baselineJson,
         persistLevel3Baselines: true,
+        excludedLinkedPaths: new Set(),
       });
       expect(r.findings).toHaveLength(0);
       expect(r.baselineUpserts).toHaveLength(1);
@@ -564,6 +575,7 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
         projectRoot: root,
         getBaseline: () => stableStringifyFingerprints(fp),
         persistLevel3Baselines: true,
+        excludedLinkedPaths: new Set(),
       });
       const removed = r.findings.filter((f) => f.kind === 'linked_file_removed');
       expect(removed.map((f) => f.paths)).toEqual([['src/gone.ts']]);
@@ -583,6 +595,7 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
       projectRoot,
       getBaseline: () => null,
       persistLevel3Baselines: false,
+      excludedLinkedPaths: new Set(),
     });
     const viaGit = collectSemanticStalenessFindings(input(makeGitFixture(files)));
     expect(viaGit.stats.listing_source).toBe('git');
@@ -591,5 +604,123 @@ describe('optimization/staleness (001-aegis-perf-upgrade US1)', () => {
     const viaWalk = collectSemanticStalenessFindings(input(makeWalkFixture(files)));
     expect(viaWalk.stats.listing_source).toBe('walk');
     expect(viaWalk.stats.files_listed).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Docs-sourced paths are excluded from edge-linked Level-3 fingerprints: a document body change is reported by
+// Level 1 of that document, and counting it again as Level 3 of every doc whose edge glob matches docs/** made each
+// docs commit leave Level-3 findings that only a staleness-ack could clear.
+// ---------------------------------------------------------------------------
+
+describe('optimization/staleness (docs source paths excluded from Level 3)', () => {
+  function fileAnchored(docId: string, sourcePath: string): Document {
+    return { ...approvedDoc(docId), ownership: 'file-anchored', source_path: sourcePath };
+  }
+
+  it('docSourcePathSet collects source_path and source_refs of approved docs', () => {
+    const ms: Document = {
+      ...fileAnchored('ms', 'docs/ms.md'),
+      source_refs_json: JSON.stringify([
+        { asset_path: 'docs/a.md', anchor_type: 'file', anchor_value: '' },
+        { asset_path: 'docs/b.md', anchor_type: 'file', anchor_value: '' },
+      ]),
+    };
+    const draft: Document = { ...fileAnchored('draft', 'docs/draft.md'), status: 'draft' };
+    const set = docSourcePathSet([fileAnchored('one', 'docs/one.md'), approvedDoc('standalone'), ms, draft]);
+    expect([...set].sort()).toEqual(['docs/a.md', 'docs/b.md', 'docs/ms.md', 'docs/one.md']);
+  });
+
+  function scanWith(root: string, baseline: string, excluded: ReadonlySet<string>) {
+    return collectSemanticStalenessFindings({
+      docs: [approvedDoc('g')],
+      edges: [pathEdge('e1', 'docs/**', 'g'), pathEdge('e2', 'src/**', 'g')],
+      projectRoot: root,
+      getBaseline: (id) => (id === 'g' ? baseline : null),
+      persistLevel3Baselines: true,
+      excludedLinkedPaths: excluded,
+    });
+  }
+
+  it('a change of an excluded docs path reports no Level-3 finding and refreshes the baseline without it', () => {
+    const root = makeWalkFixture({ 'docs/x.md': '# x v2\n', 'src/a.ts': 'export const A = 1;\n' });
+    const baseline = stableStringifyFingerprints({
+      'docs/x.md': `raw:${hashUtf8('# x v1\n')}`,
+      'src/a.ts': `sym:${hashUtf8(extractTsExportedSymbols('export const A = 1;\n').join('\n'))}`,
+    });
+    const r = scanWith(root, baseline, new Set(['docs/x.md']));
+    expect(r.findings.filter((f) => f.level === 3)).toEqual([]);
+    const upsert = r.baselineUpserts.find((u) => u.doc_id === 'g');
+    expect(upsert).toBeDefined();
+    expect(Object.keys(JSON.parse(upsert!.fingerprint_json) as Record<string, string>)).toEqual(['src/a.ts']);
+  });
+
+  it('without the exclusion the same change is a Level-3 finding (control)', () => {
+    const root = makeWalkFixture({ 'docs/x.md': '# x v2\n', 'src/a.ts': 'export const A = 1;\n' });
+    const baseline = stableStringifyFingerprints({
+      'docs/x.md': `raw:${hashUtf8('# x v1\n')}`,
+      'src/a.ts': `sym:${hashUtf8(extractTsExportedSymbols('export const A = 1;\n').join('\n'))}`,
+    });
+    const r = scanWith(root, baseline, new Set());
+    expect(r.findings.some((f) => f.level === 3 && f.paths?.includes('docs/x.md'))).toBe(true);
+  });
+
+  it('an excluded path that is only in the baseline is not reported as removed', () => {
+    const root = makeWalkFixture({ 'src/a.ts': 'export const A = 1;\n' });
+    const baseline = stableStringifyFingerprints({
+      'docs/gone.md': `raw:${hashUtf8('# gone\n')}`,
+      'src/a.ts': `sym:${hashUtf8(extractTsExportedSymbols('export const A = 1;\n').join('\n'))}`,
+    });
+    const r = scanWith(root, baseline, new Set(['docs/gone.md']));
+    expect(r.findings.filter((f) => f.level === 3)).toEqual([]);
+  });
+
+  it('code changes are still reported when docs paths are excluded', () => {
+    const root = makeWalkFixture({ 'docs/x.md': '# x\n', 'src/a.ts': 'export const B = 1;\n' });
+    const baseline = stableStringifyFingerprints({
+      'docs/x.md': `raw:${hashUtf8('# x\n')}`,
+      'src/a.ts': `sym:${hashUtf8(extractTsExportedSymbols('export const A = 1;\n').join('\n'))}`,
+    });
+    const r = scanWith(root, baseline, new Set(['docs/x.md']));
+    expect(r.findings.filter((f) => f.level === 3).map((f) => f.paths)).toEqual([['src/a.ts']]);
+  });
+
+  it('a doc whose edges match only excluded paths is not scanned for Level 3', () => {
+    const root = makeWalkFixture({ 'docs/x.md': '# x v2\n' });
+    const baseline = stableStringifyFingerprints({ 'docs/x.md': `raw:${hashUtf8('# x v1\n')}` });
+    const r = collectSemanticStalenessFindings({
+      docs: [approvedDoc('g')],
+      edges: [pathEdge('e1', 'docs/**', 'g')],
+      projectRoot: root,
+      getBaseline: () => baseline,
+      persistLevel3Baselines: true,
+      excludedLinkedPaths: new Set(['docs/x.md']),
+    });
+    expect(r.findings).toEqual([]);
+    expect(r.baselineUpserts).toEqual([]);
+  });
+
+  it('a multi-source doc still fingerprints its own source_refs even when they are excluded', () => {
+    const root = makeWalkFixture({ 'docs/a.md': 'alpha v2\n', 'docs/b.md': 'beta\n' });
+    const doc: Document = {
+      ...fileAnchored('ms', 'docs/a.md'),
+      source_refs_json: JSON.stringify([
+        { asset_path: 'docs/a.md', anchor_type: 'file', anchor_value: '' },
+        { asset_path: 'docs/b.md', anchor_type: 'file', anchor_value: '' },
+      ]),
+    };
+    const baseline = stableStringifyFingerprints({
+      'docs/a.md': `raw:${hashUtf8('alpha v1\n')}`,
+      'docs/b.md': `raw:${hashUtf8('beta\n')}`,
+    });
+    const r = collectSemanticStalenessFindings({
+      docs: [doc],
+      edges: [pathEdge('e1', 'docs/**', 'ms')],
+      projectRoot: root,
+      getBaseline: () => baseline,
+      persistLevel3Baselines: false,
+      excludedLinkedPaths: docSourcePathSet([doc]),
+    });
+    expect(r.findings.some((f) => f.level === 3 && f.paths?.includes('docs/a.md'))).toBe(true);
   });
 });

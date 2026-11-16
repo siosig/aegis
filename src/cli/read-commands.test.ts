@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,8 +9,10 @@ import {
   CliUsageError,
   parseEdgesCli,
   parseResolveCli,
+  parseStalenessReportCli,
   runEdgesCli,
   runResolveCli,
+  runStalenessReportCli,
 } from './read-commands.js';
 
 function fakeIo(): CliIo & { out: string[]; err: string[] } {
@@ -226,5 +229,90 @@ describe('runResolveCli', () => {
       { path: './src/a.ts', normalized_path: 'src/a.ts', documents: [], resolution_path: [] },
       { path: 'src/a.ts', normalized_path: 'src/a.ts', documents: [], resolution_path: [] },
     ]);
+  });
+});
+
+describe('parseStalenessReportCli', () => {
+  it('requires --base-ref and defaults the head to the working tree', () => {
+    expect(parseStalenessReportCli(['--base-ref', 'HEAD'], cwd)).toEqual({
+      projectRoot: cwd,
+      dbPath: join(cwd, '.aegis', 'aegis.db'),
+      baseRef: 'HEAD',
+      headRef: null,
+      docIds: null,
+    });
+    expect(() => parseStalenessReportCli([], cwd)).toThrow('--base-ref is required');
+  });
+
+  it('parses --head-ref, --doc-ids and accepts --json', () => {
+    const o = parseStalenessReportCli(['--json', '--base-ref=abc', '--head-ref', 'HEAD', '--doc-ids', 'a, b,,a'], cwd);
+    expect(o.headRef).toBe('HEAD');
+    expect(o.docIds).toEqual(['a', 'b', 'a']);
+  });
+
+  it.each([
+    [['--base-ref', ''], '--base-ref requires a non-empty value'],
+    [['--base-ref', 'x', '--head-ref', ''], '--head-ref requires a non-empty value'],
+    [['--base-ref', 'x', '--doc-ids', ' , '], '--doc-ids requires at least one doc_id'],
+    [['--base-ref', 'x', 'extra'], 'Unexpected argument'],
+  ])('rejects %j', (args, message) => {
+    expect(() => parseStalenessReportCli(args, cwd)).toThrow(CliUsageError);
+    expect(() => parseStalenessReportCli(args, cwd)).toThrow(message);
+  });
+});
+
+describe('runStalenessReportCli', () => {
+  function initGit(): string {
+    execFileSync('git', ['init', '-q'], { cwd, stdio: 'ignore' });
+    writeFileSync(join(cwd, 'x.txt'), 'x\n');
+    execFileSync('git', ['add', '-A'], { cwd, stdio: 'ignore' });
+    execFileSync(
+      'git',
+      [
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@example.invalid',
+        '-c',
+        'commit.gpgsign=false',
+        'commit',
+        '-q',
+        '-m',
+        'c0',
+      ],
+      { cwd, stdio: 'ignore' },
+    );
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf-8' }).trim();
+  }
+
+  it('returns 2 and creates nothing when the database does not exist', async () => {
+    const io = fakeIo();
+    const dbPath = join(cwd, 'missing.db');
+    expect(await runStalenessReportCli(['--base-ref', 'HEAD', '--db', dbPath], io, cwd)).toBe(2);
+    expect(existsSync(dbPath)).toBe(false);
+    expect(io.out).toEqual([]);
+  });
+
+  it('prints the resolved refs and no documents for an empty database', async () => {
+    const sha = initGit();
+    const dbPath = join(cwd, 'a.db');
+    (await createDatabase(dbPath)).close();
+
+    const io = fakeIo();
+    expect(await runStalenessReportCli(['--base-ref', 'HEAD', '--db', dbPath], io, cwd)).toBe(0);
+    expect(io.err).toEqual([]);
+    expect(JSON.parse(io.out[0])).toEqual({ base_ref: sha, head_ref: null, documents: [] });
+  });
+
+  it('returns 2 with a single-line error when a ref names no commit', async () => {
+    initGit();
+    const dbPath = join(cwd, 'a.db');
+    (await createDatabase(dbPath)).close();
+
+    const io = fakeIo();
+    expect(await runStalenessReportCli(['--base-ref', 'nope', '--db', dbPath], io, cwd)).toBe(2);
+    expect(io.out).toEqual([]);
+    expect(io.err).toHaveLength(1);
+    expect(io.err[0]).toMatch(/^\[aegis\] staleness-report: 'nope' does not name a commit/);
   });
 });

@@ -75,6 +75,7 @@ export {
 export {
   buildEdgeMatchers,
   collectSemanticStalenessFindings,
+  docSourcePathSet,
   extractTsExportedSymbols,
   FingerprintMemo,
   findRenameCandidatePath,

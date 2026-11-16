@@ -1,7 +1,7 @@
 ---
 description: "aegis（このフォーク）の内部設計（モジュール構成、不変条件と強制箇所、Observation から Canonical までの流れ、sql.js の DB 層の書き込み経路、snapshot の保持、staleness の Level 1〜3 と基準値、admin の操作の CLI）と、ADR 001〜020 のうち元に戻してはいけない判断の理由。コードを改修する前、とくにサーフェスの境界・承認の経路・DB の書き込み・staleness・CLI と MCP の分担に触る前に読む。"
-updated: 2026-11-01
-keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P-1, P-3, ADR, Do not undo, sql.js, lock, reload, persist, staleness, baseline, 基準値, approve-pending, staleness-ack, edges, resolve, admin-cli, tool-input-schemas, init-confirm, routeBase, openDatabaseSnapshot, observation, proposal, snapshot, pruning, VACUUM, not installed]
+updated: 2026-11-16
+keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P-1, P-3, ADR, Do not undo, sql.js, lock, reload, persist, staleness, baseline, 基準値, approve-pending, staleness-ack, staleness-report, attributable, 帰属, docSourcePathSet, excludedLinkedPaths, edges, resolve, admin-cli, tool-input-schemas, init-confirm, routeBase, openDatabaseSnapshot, observation, proposal, snapshot, pruning, VACUUM, not installed]
 ---
 # aegis 設計
 
@@ -19,8 +19,8 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 
 | パス | 役割 |
 |---|---|
-| `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け（`edges`・`resolve` と admin の操作の CLI）、起動モード（待機モード）による DB・サーバーの選択、MCP サーバーの起動 |
-| `src/cli/read-commands.ts` | 読み取り専用の CLI のサブコマンド `edges`・`resolve` の引数の解析と実行。`src/core/` だけを使い、`src/mcp/` を import しない（`AegisService` を通さない） |
+| `src/main.ts` | 入口。起動引数の解析、CLI のサブコマンドの振り分け（`edges`・`resolve`・`staleness-report` と admin の操作の CLI）、起動モード（待機モード）による DB・サーバーの選択、MCP サーバーの起動 |
+| `src/cli/read-commands.ts` | 読み取り専用の CLI のサブコマンド `edges`・`resolve`・`staleness-report` の引数の解析と実行。`src/core/` だけを使い、`src/mcp/` を import しない（`AegisService` を通さない） |
 | `src/cli/admin-commands.ts` | admin だけの MCP ツール 9 本に当たる CLI のサブコマンドの引数の解析と実行（`import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）。`AegisService` を `'admin'` で呼ぶので `src/mcp/` を import する |
 | `src/mcp/tool-input-schemas.ts` | admin だけの 9 ツールの zod の入力スキーマ。`server.ts` と `src/cli/admin-commands.ts` が共有する |
 | `src/mcp/server.ts` | MCP のツールとリソースの登録。サーフェスが `ssa`・`admin` のときに ssa の 6 ツールを、`admin` のときだけ残りの管理用の 12 ツールを登録する。待機モードでは `createDormantAegisServer` が 2 本だけを登録する |
@@ -29,7 +29,7 @@ keywords: [architecture, design, 設計判断, invariant, 不変条件, INV-6, P
 | `src/core/read/` | `compiler.ts`（DAG のたどり方・notices）、`allocator.ts`（delivery の割り当て）、`workspace-status.ts`、`knowledge-query.ts`（`edges`・`resolve` の出力の組み立て。base の照合は `compiler.ts` の `routeBase` を compile と共有する） |
 | `src/core/store/` | `database.ts`（sql.js の包装・ロック・永続化）、`repository.ts`（Canonical の読み書き・承認・snapshot）、`schema.ts`、`migrations/`（001〜016）、`snapshot-pruning.ts` |
 | `src/core/automation/` | Observation の分析器、提案の作成（`propose.ts`）、一括承認（`approve-pending.ts`） |
-| `src/core/optimization/` | staleness の検査（`staleness.ts`）、ファイルの列挙（`repo-file-listing.ts`）、staleness の確定（`staleness-ack.ts`）、取り込み計画、エッジ候補、文書分割の判定、co-change のキャッシュ |
+| `src/core/optimization/` | staleness の検査（`staleness.ts`）、ファイルの列挙（`repo-file-listing.ts`）、staleness の確定（`staleness-ack.ts`）、コミットの範囲への帰属の判定（`staleness-report.ts`）、取り込み計画、エッジ候補、文書分割の判定、co-change のキャッシュ |
 | `src/core/init/` | スタックの検出、テンプレートの読み込み、初期化、テンプレートの更新、導入済みの目印の判定（`install-marker.ts`） |
 | `src/core/project-share/` | 共有バンドルの書き出しと DB の作り直し、共有ソースの検査・整形・適用・書き出し、共有の状態の判定 |
 | `src/core/tagging/` | 意図タグの推定の口（`IntentTagger`） |
@@ -120,12 +120,13 @@ sequenceDiagram
 |---|---|---|
 | 1 | `hash_mismatch` | `file-anchored` で `source_path` を持つ文書について、ソースファイルの SHA-256 が DB の `content_hash` と違う。`source_refs` が 2 つ以上の文書は対象外 |
 | 2 | `source_unreadable`・`source_missing`・`rename_candidate` | ソースファイルを読めない・無い。無いときは同じ内容のファイルを探して改名の候補として出す |
-| 3 | `linked_file_added`・`linked_file_removed`・`symbol_drift` | 文書に結び付くファイルの指紋を基準値と比べる。結び付くファイルは、承認済みの `path_requires`（パスを起点とするもの）の glob に一致する列挙済みのファイルと、`source_refs` が 2 つ以上なら参照先のパスである |
+| 3 | `linked_file_added`・`linked_file_removed`・`symbol_drift` | 文書に結び付くファイルの指紋を基準値と比べる。結び付くファイルは、承認済みの `path_requires`（パスを起点とするもの）の glob に一致する列挙済みのファイル（承認済みの文書のソースを除く）と、`source_refs` が 2 つ以上なら参照先のパスである |
 
 - 指紋は、TypeScript 系（`.ts`・`.tsx`・`.mts`・`.cts`）なら export したシンボル名の一覧の SHA-256、それ以外ならファイルのバイト列の SHA-256 である。指紋は 1 回の検査の中だけでメモ化し、検査をまたいで持たない（ADR-019 D-2）。
 - 基準値は `staleness_baselines`（`doc_id` ごとの指紋の JSON）に置く。基準値が無い・壊れていれば今回の指紋をそのまま基準値にして指摘を出さない。基準値を書き直すのはドリフトの無い回だけで、`--dry-run` では書かない。
 - 列挙の範囲外になったパス（git の ignore の対象・飛ばすディレクトリの中）と、列挙から外れたがディスクにあってエッジの glob にまだ一致するパスは、消えても `linked_file_removed` にしない。走査から `git ls-files` に切り替えた時点の古い基準値で、指摘が永久に残らないようにするためである。
 - 承認でその文書のパス起点の `path_requires` のエッジが変わる（`add_edge`・`retarget_edge` の新旧両方の文書・`remove_edge`）と、`_invalidateStalenessBaselinesForPathEdge` が同じトランザクションで基準値を消し、Level 3 の Observation をアーカイブする。
+- glob で結び付くファイルからは、承認済みの全文書のソース（`docSourcePathSet`。`source_path` と `source_refs_json` の参照先）を除く（`excludedLinkedPaths`。呼び出し側は対象の文書が一部でも全文書から作って渡す）。除いたパスが基準値にだけ残る場合は比較から外し、ドリフトの無い回の取り直しで基準値から消す。2 つ以上の `source_refs` を持つ文書の自分の参照先は除かない。理由: 文書の本文の変更はその文書の Level 1 が報告する。`docs/**` に一致するエッジを持つ文書では、docs を直すコミットのたびに Level 3 の指摘が残り、`staleness-ack` でしか消えなかった（2026-11-16 に ssa の利用者から報告）。アルゴリズムの版は上げない。上げると未アーカイブの Observation の payload が変わり、重複除去を通り抜けて同じ指摘が記録し直される。
 - 元に戻さないこと: 基準値をドリフトのある回に書き直さない。書き直すと、人が確かめる前に指摘が消える。エッジの変更時の基準値の削除と Observation のアーカイブを片方だけにしない。基準値を消しても Observation が残れば、同じ内容の重複除去によって、その後の指摘が記録されなくなる。
 
 ## approve-pending と staleness-ack の設計
@@ -136,11 +137,13 @@ sequenceDiagram
 - 承認済みのエッジと経路のキー（`source_type`・`source_value`・`target_doc_id`・`edge_type`）が同じ `add_edge` は、承認が必ず失敗するので `duplicate_edge` で却下する（`reanalyzeEvidence: false`）。`document_import` の analyzer は承認済みエッジとの重複を除かない（`propose.ts` が除くのは pending 同士だけ）ので、`reject-proposal`（観測を未分析に戻す）では同じ提案が作り直され、却下も承認もできないまま pending が残って `materialize` を止める。判定は承認の直前にその時点の DB に対して行う。同じ実行内で先に承認した `add_edge` とも衝突を見られ、先の承認が失敗したときは後ろを巻き込まない。`--dry-run` は DB が変わらないので、先に `would_approve` に入れた `add_edge` のキーを覚えて同じ分類にする。衝突先のエッジを pending の `remove_edge`・`retarget_edge`・`deprecate`（エッジ）が変える予定のときは却下せず、従来どおり承認を試みる（失敗なら pending のまま残り、衝突先が消えた後に承認できる）。
 - 判断: コードだけが変わったことによる Level 3 の指摘は、エッジを変えても消えない。人が文書とコードを照らして確かめた後に、admin 専用の CLI `staleness-ack` で確定する。確定は 2 段で行う。まず現在の Level 3 の指摘を数え、次に基準値なしとして取り直す。基準値の書き込みと Level 3 の Observation のアーカイブは 1 トランザクションで行う（ADR-019 D-1）。
 - 理由: `maintenance` はドリフトの無い回にしか基準値を書き直さないので、確定の操作が無いと指摘が永久に残る。Observation もアーカイブしないと、重複除去によって同じ指摘が二度と記録されない。
+- 判断: Level 3 の指摘ごとに、コミットの範囲 `base..head`（`head` を省くと作業ツリー）への帰属を判定する（`src/core/optimization/staleness-report.ts`）。帰属は「基準値の指紋 = `base` の時点の指紋」かつ「検査で見た指紋 = `head` の時点の指紋」で決め、`git cat-file --filters <commit>:./<path>` で blob を作業ツリーの形に変換してから指紋をとる。読み取り専用の CLI `staleness-report` で出し、`staleness-ack --only-attributable --base-ref <ref> [--head-ref <ref>]` で、指摘がすべて帰属する文書だけを確定する。
+- 理由: 帰属する指摘は、その範囲の差分だけを見れば文書と照らせる。コミットを作るエージェントは差分と文書を照らした後に、人に確定を頼まずに済む。帰属しない指摘（確定していない以前のコミット・未コミットの変更・エッジの変更が原因）は、差分に原因が無いので人が見る。`--filters` を付けないと、`eol=crlf` などの変換があるファイルで作業ツリーの指紋と一致しない。`<commit>:./<path>` の `./` は、プロジェクトのルートが git の最上位より下にあっても、パスをルートからの相対で解かせるためである。
 - 元に戻さないこと: どちらも MCP のツールにしない。`aegis_approve_proposal` に配列の引数を足す形でも一括承認を MCP に出さない。バンドルに属する提案は一括承認に混ぜず、全部か無しかの `aegis_approve_proposal_bundle` に任せる。
 
 ## edges と resolve の設計
 
-- 判断: `edges` と `resolve` は読み取り専用の CLI で、MCP のツールにしない。実装は `src/cli/read-commands.ts`（引数の解析と終了コード）と `src/core/read/knowledge-query.ts`（出力の組み立て）に分け、`AegisService` を通さず `src/core/` を直接使う。DB は `openDatabaseSnapshot` で開く。
+- 判断: `edges`・`resolve`・`staleness-report` は読み取り専用の CLI で、MCP のツールにしない。実装は `src/cli/read-commands.ts`（引数の解析と終了コード）と `src/core/read/knowledge-query.ts`（出力の組み立て）に分け、`AegisService` を通さず `src/core/` を直接使う。DB は `openDatabaseSnapshot` で開く。
 - 判断: `resolve` の照合は `ContextCompiler.routeBase` を呼ぶ。`compile` も同じ `routeBase` を呼ぶので、1 つのパスだけを渡した `aegis_compile_context` の `base` と、文書の並び・`source_path`・`resolution_path` が一致する。delivery の割り当て（allocator）は通さないので、予算超過でも照合の結果を返す。
 - 理由: ssa の検査スクリプトが、MCP サーバーを起動せずに CLI 1 回で「承認済みのエッジの全体」と「パスごとに配られる文書」を JSON で受け取って照合する。照合を別に実装すると compile とずれ、決定性（P-1）の保証が崩れる。
 - 理由: 通常の `createDatabase` はロックを取り、移行があればファイルへ書き戻す。読むだけの CLI が他のプロセスの書き込みを待ったり、ファイルを書き換えたりしないよう、`openDatabaseSnapshot` でロック無しにファイルを 1 回読み、メモリ上の複製で動かす。
@@ -202,6 +205,7 @@ sequenceDiagram
 - D-5: MCP のツールのエラーは原因を含める（`toolErrorResult`）。全ツールを包むミドルウェアにはしない。`compile_context` と `observe` は意図して例外を投げ直すからである。
 - D-6: `@modelcontextprotocol/sdk` は 1.x に留め、v2 への移行は別の作業にする。Node.js は 26 以上、パッケージマネージャは pnpm（`packageManager: pnpm@12.8.1`）で、`pnpm-workspace.yaml` の `allowBuilds` は `esbuild: false`、`node-llama-cpp: true` とする。
 - 追記: 「未導入プロジェクトの待機モードの判断」の節。
+- 追記（2026-11-16）: docs のソースの Level 3 からの除外は「staleness の Level 1〜3 と基準値」の節、コミットの範囲への帰属と `staleness-ack --only-attributable` は「approve-pending と staleness-ack の設計」の節。除外の前に記録された docs のパスの Level 3 の観測はアーカイブされずに残るが、分析済みなので `doctor`・`stats` には数えない。
 - 範囲外として決めたこと: DB スキーマの変更（`staleness_baselines` への版の列の追加を含む）、`knowledge_version` と `snapshot_id` の意味の変更、agent サーフェスへのツールの追加はしない。
 
 ## 採用しなかった案
@@ -231,15 +235,15 @@ sequenceDiagram
 
 | 資料 | 確認日 | 内容 |
 |---|---|---|
-| `src/cli/read-commands.ts`・`src/core/read/knowledge-query.ts` | 2026-11-01 | edges・resolve の解析・出力・終了コード |
+| `src/cli/read-commands.ts`・`src/core/read/knowledge-query.ts` | 2026-11-16 | edges・resolve・staleness-report の解析・出力・終了コード |
 | `src/cli/admin-commands.ts`・`src/mcp/tool-input-schemas.ts` | 2026-11-01 | admin の操作の CLI のサブコマンド、入力スキーマの共有、終了コード、`init-confirm` |
-| `src/main.ts` | 2026-11-01 | 待機モードの判定、DB の選択、CLI の振り分け、`approve-pending`・`staleness-ack` の終了コード |
+| `src/main.ts` | 2026-11-16 | 待機モードの判定、DB の選択、CLI の振り分け、`approve-pending`・`staleness-ack` の終了コード |
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | 2026-11-01 | ツールの登録の分岐、`assertSurfaceAllows`・`SSA_ALLOWED_OPERATIONS`、分析器の登録表、`analyzeAndPropose`、`runMaintenance` |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts` | 2026-11-01 | 文書の選び方と並べ方、notices、delivery の採用順 |
 | `src/core/store/database.ts` | 2026-11-01 | ロック・読み直し・一時ファイルと rename・`createDatabase` |
 | `src/core/store/repository.ts`・`src/core/store/snapshot-pruning.ts` | 2026-11-01 | 承認の処理、循環の検査、snapshot の作成と刈り込み、基準値の無効化 |
 | `src/core/automation/propose.ts`・`src/core/automation/approve-pending.ts` | 2026-11-01 | 提案の作成と重複除去、一括承認 |
-| `src/core/optimization/staleness.ts`・`src/core/optimization/repo-file-listing.ts`・`src/core/optimization/staleness-ack.ts` | 2026-11-01 | staleness の Level 1〜3、指紋、列挙、確定 |
+| `src/core/optimization/staleness.ts`・`src/core/optimization/repo-file-listing.ts`・`src/core/optimization/staleness-ack.ts`・`src/core/optimization/staleness-report.ts` | 2026-11-16 | staleness の Level 1〜3、指紋、列挙、確定、帰属の判定 |
 | `package.json`・`pnpm-workspace.yaml` | 2026-11-01 | 依存・Node.js の要件・pnpm の設定 |
 | `docs/プロジェクト計画v2.md` | 2026-11-01 | 原則 P-1〜P-5 と不変条件 INV-1〜INV-6 の原文 |
 | `docs/adr/001-document-import-strategy.md` 〜 `docs/adr/020-ssa-surface.md` | 2026-11-01 | 元に戻さない判断と採らなかった案 |

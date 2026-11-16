@@ -1,7 +1,7 @@
 ---
 description: "aegis（このフォーク）の現行の外部仕様（MCP サーバーの起動引数、DB の場所と待機モード、サーフェスごとのツール、aegis_compile_context の入出力、CLI のサブコマンドと終了コード、環境変数、永続ファイル、フォーク固有の振る舞い）。ツールや CLI の挙動を変える・呼び出し方を確かめる・既定値を調べるときに読む。"
-updated: 2026-11-01
-keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, edges, resolve, import-doc, init-confirm, approve-proposal, admin CLI, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, dormant, 待機モード, CLAUDE.md, AEGIS_SNAPSHOT_RETENTION]
+updated: 2026-11-16
+keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, notices, CLI, exit code, 終了コード, maintenance, approve-pending, staleness-ack, staleness-report, attributable, 帰属, edges, resolve, import-doc, init-confirm, approve-proposal, admin CLI, share-export, share-hydrate, share-materialize, .aegis, aegis.db, in-memory, 未導入, dormant, 待機モード, CLAUDE.md, AEGIS_SNAPSHOT_RETENTION]
 ---
 # aegis 仕様
 
@@ -10,7 +10,7 @@ keywords: [aegis, MCP, surface, agent, admin, ssa, compile_context, delivery, no
 - aegis は、編集対象のファイルパスから DAG（パスと文書を結ぶエッジ）をたどり、AI エージェントに渡す文書の集合を決定的に返す MCP サーバー（stdio）である。パッケージは `@fuwasegu/aegis` 版 1.1.0、入口は `dist/main.js`、Node.js 26 以上を要する。
 - MCP のツールは 3 つのサーフェスに分かれる。`agent` サーフェスは 6 ツール、`ssa` サーフェスは agent の 6 ツールに 6 ツールを足した 12 ツール、`admin` サーフェスは agent の 6 ツールに管理用の 18 ツールを足した 24 ツールを登録する（`agent` ⊂ `ssa` ⊂ `admin`）。ただし、プロジェクトに導入の目印が無く `--db` も無いときは待機モードで起動し、サーフェスによらず 2 ツール（`aegis_init_detect`・`aegis_workspace_status`）だけを登録する。
 - 知識の正本（Canonical Knowledge）は SQLite の DB にある。MCP サーバーは、`--db` を明示したとき、または導入の目印（プロジェクトルートの `CLAUDE.md` の `aegis: 導入済み` を含む行、または `.aegis`）があるときだけ DB ファイルを開く・作る。どちらでもなければ待機モードで動き、空のインメモリ DB を使い、ファイルを作らず、「未導入」を stderr と `aegis_workspace_status` の応答で知らせる。
-- 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`edges`・`resolve`・`stats`・`doctor`・`share-*`、および admin の操作の `import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）。
+- 第 1 引数がサブコマンド名なら MCP サーバーではなく CLI として動く（`deploy-adapters`・`maintenance`・`approve-pending`・`staleness-ack`・`staleness-report`・`edges`・`resolve`・`stats`・`doctor`・`share-*`、および admin の操作の `import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）。
 - 内部設計と「元に戻してはいけない判断」の理由は `docs/plan.md` に置く。本書は外から観測できる振る舞いだけを書く。
 
 ## MCP サーバーの起動引数
@@ -213,7 +213,8 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 | `deploy-adapters` | `--project-root`、`--targets <a,b>`（`cursor`・`claude`・`codex`。省略時は全部）、`--db` | IDE 向けのルールとスキルを配る（「永続ファイル」の節）。DB ファイルが無ければ 1。結果に `conflict`・`failed` があっても 0。全対象に配り、失敗も衝突も無いときだけ `adapter_meta` に版を記録する |
 | `maintenance` | `--dry-run`、`--days <N>`（既定 90）、`--project-root`、`--db`、`--templates`、`--template-dir` | Observation の分析、文書の同期、アーカイブ、テンプレートの更新確認、co-change のキャッシュ、staleness の検査、DB の圧縮を順に行い、6 つの節の要約を出す。DB ファイルが無い・`--days` が正の整数でなければ 1。`--dry-run` でなく、Observation の分析に失敗が 1 件でもあれば 1。それ以外は 0 |
 | `approve-pending` | `--dry-run`、`--types <t1,t2>`、`--project-root`、`--db`、`--templates`、`--template-dir` | pending の提案を一括で承認する（「フォーク固有の振る舞い」の節）。stdout に JSON 1 つ、stderr に要約 1 行。完了で 0、承認の失敗を含むと 1、引数の誤り・DB ファイルが無い・例外は 2 |
-| `staleness-ack` | `--doc-ids <a,b>` か `--all`（どちらか 1 つが必須）、`--dry-run`、`--project-root`、`--db`、`--templates`、`--template-dir` | 文書の Level 3 の基準値を現在のファイルから取り直し、その文書の Level 3 の `staleness_detected` をアーカイブする。stdout に JSON 1 つ。完了で 0、引数の誤り・未知または未承認の `doc_id`・DB ファイルが無い・例外は 2 |
+| `staleness-ack` | `--doc-ids <a,b>` か `--all`（どちらか 1 つが必須）、`--dry-run`、`--only-attributable`（`--base-ref <ref>` が必須、`--head-ref <ref>` は任意。`--base-ref`・`--head-ref` は `--only-attributable` が無いと引数の誤り）、`--project-root`、`--db`、`--templates`、`--template-dir` | 文書の Level 3 の基準値を現在のファイルから取り直し、その文書の Level 3 の `staleness_detected` をアーカイブする。`--only-attributable` では、Level 3 の指摘がすべてコミットの範囲に帰属する文書だけを対象にする（「フォーク固有の振る舞い」の節）。stdout に JSON 1 つ。完了で 0、引数の誤り・未知または未承認の `doc_id`・コミットを指さない ref・DB ファイルが無い・例外は 2 |
+| `staleness-report` | `--base-ref <ref>`（必須）、`--head-ref <ref>`（省くと作業ツリー）、`--doc-ids <a,b>`、`--json`（受け付けて無視する）、`--project-root`、`--db` | Level 3 の指摘を文書ごとに、コミットの範囲への帰属の判定を付けて出す（「フォーク固有の振る舞い」の節）。読み取り専用で、DB に書かず、ロックも取らない。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・コミットを指さない ref・未知または未承認の `doc_id`・例外は 2 |
 | `import-doc` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_import_doc` を実行する。文書を取り込み、提案を作る。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
 | `analyze-import-batch` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_analyze_import_batch` を実行する。取り込み計画を分析する（読み取り専用）。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
 | `execute-import-plan` | `--input <path\|->`、`--project-root`、`--db`、`--templates`、`--template-dir` | `aegis_execute_import_plan` を実行する。分析した取り込み計画を提案のバンドルにする。入力は JSON で、詳細は「admin の操作の CLI」の小節。stdout に JSON 1 つ。完了で 0、引数の誤り・DB ファイルが無い・サービス層の例外は 2 |
@@ -237,7 +238,7 @@ Aegis is in dormant mode: it is not installed in this project (no line containin
 - `maintenance` の要約の節は `process_observations`・`sync_docs`（staleness の報告を含む）・`archive`・`check_upgrade`・`co_change_cache`・`db_compaction` の 6 つである。`--dry-run` では Observation の分析を飛ばし、基準値を書かず、`VACUUM` も実行しない。
 - `stats` と `doctor` は DB を開くだけで、`source_path` の正規化の移行は行わない。ただし DB を開くときにスキーマの移行が必要なら、その分は書き込む。
 - `edges` と `resolve` も `source_path` の正規化の移行を行わない（古い DB の絶対パスの `source_path` はそのまま出る）。DB とその隣のファイルに一切書かず、ロックも取らない。移行が要る古い DB でも移行はメモリ上だけで行う。
-- `approve-pending`・`staleness-ack`・`edges`・`resolve` と admin の操作の 9 つ（`import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）は未知のオプションと値の無いオプションを引数の誤りとして扱う。ほかのサブコマンドは未知のオプションを無視する。`edges`・`resolve` と admin の操作の 9 つは `--opt=value` の形も受け付け、`-` で始まる値は `--db=-foo` の形でだけ渡せる（`--db -foo` は値の無いオプションとして誤りになる）。
+- `approve-pending`・`staleness-ack`・`staleness-report`・`edges`・`resolve` と admin の操作の 9 つ（`import-doc`・`analyze-import-batch`・`execute-import-plan`・`init-confirm`・`apply-upgrade`・`reject-proposal`・`preflight-proposal-bundle`・`approve-proposal-bundle`・`approve-proposal`）は未知のオプションと値の無いオプションを引数の誤りとして扱う。ほかのサブコマンドは未知のオプションを無視する。`staleness-report`・`edges`・`resolve` と admin の操作の 9 つは `--opt=value` の形も受け付け、`-` で始まる値は `--db=-foo` の形でだけ渡せる（`--db -foo` は値の無いオプションとして誤りになる）。
 
 ### admin の操作の CLI
 
@@ -514,7 +515,9 @@ admin だけの MCP ツール 9 本に当たるサブコマンドである。入
   - 処理中に pending でなくなった提案は `reason: "no_longer_pending"` で `skipped` に入れ、失敗に数えない。
   - 出力の JSON は `approved`・`would_approve`・`rejected`・`would_reject`・`skipped`・`failed` を持つ。`--dry-run` では書き込まない。
   - MCP のツールとしては公開しない。
-- `staleness-ack` は、コードの変化による Level 3 の指摘（`symbol_drift` など）を、人が確かめた後に確定する。出力の JSON は `dry_run`・`acknowledged`（種別ごとの Level 3 の指摘数と、新しい基準値のパス数）・`skipped`（`reason: no_linked_paths | source_unreadable`）・`archived_observations` を持つ。Level 1 と Level 2 には効かない（`aegis_sync_docs` で解消する）。
+- `staleness-ack` は、コードの変化による Level 3 の指摘（`symbol_drift` など）を、人が確かめた後に確定する。出力の JSON は `dry_run`・`acknowledged`（種別ごとの Level 3 の指摘数と、新しい基準値のパス数）・`skipped`（`reason: no_linked_paths | source_unreadable | not_attributable | no_findings`）・`archived_observations` を持つ。Level 1 と Level 2 には効かない（`aegis_sync_docs` で解消する）。`--only-attributable` では、Level 3 の指摘が 1 つでも帰属しない文書を `not_attributable`、Level 3 の指摘の無い文書を `no_findings` で `skipped` に入れ、基準値も Observation も変えない。
+- `staleness-report` の出力の JSON は `base_ref`・`head_ref`（解決したコミットの SHA。作業ツリーと比べるときの `head_ref` は `null`）と `documents`（Level 3 の指摘がある文書だけ。各要素は `doc_id`・`source_path`・`ownership`・`findings[]`（`kind`・`path`・`detail`・`attributable`）・`all_attributable`）を持つ。パス `p` の指摘が帰属するのは、`p` の基準値の指紋が `--base-ref` の時点の `p` の指紋と等しく、検査で見た `p` の指紋が `--head-ref` の時点（省くと作業ツリー）の `p` の指紋と等しいときである。`linked_file_added` は基準値の側を、`linked_file_removed` は検査で見た側を「無い」とし、両側とも無い場合は等しいとみなす。blob は `git cat-file --filters <commit>:./<p>` で作業ツリーの形に変換して読み、読めなければ「無い」とする。
+- Level 3 の結び付くファイルのうち、`path_requires` の glob で結び付くものからは、承認済みの文書のソース（`source_path` と `source_refs_json` の参照先）を除く。文書の本文の変更はその文書の Level 1 が報告する。2 つ以上の `source_refs` を持つ文書の自分の参照先は除かない。除いたパスが基準値にだけ残っていても指摘しない（ドリフトの無い回の取り直しで基準値から消える）。
 - staleness の検査対象のファイルは `git ls-files --cached --others --exclude-standard -z` で列挙する（追跡ファイルと、ignore されていない未追跡ファイル）。git が無い、作業ツリーの外である、またはプロジェクトルート自体が外側のリポジトリで ignore されているときは、ディレクトリの再帰走査に切り替える（`.git`・`node_modules`・`dist`・`coverage`・`.turbo`・`target`・`out`・`.next`・`build` を飛ばす）。作業ツリーの中で `git ls-files` 自体が失敗したときは、走査に切り替えず `maintenance` を失敗させる。要約には `scan: <n> file(s) listed via git|walk, <n> fingerprint(s) computed` を出す。
 - 承認で文書の `path_requires`（パスを起点とするもの）のエッジが変わると、その文書の Level 3 の基準値を消し、Level 3 の `staleness_detected` をアーカイブする。次の `maintenance` で基準値を取り直す。
 - snapshot は最新の 20 世代（`AEGIS_SNAPSHOT_RETENTION`）と、`compile_log`・Observation・初期化の記録から参照される世代の内容行だけを残し、それ以外の世代の内容行を消す。世代の見出しの行は残す。
@@ -534,7 +537,7 @@ admin だけの MCP ツール 9 本に当たるサブコマンドである。入
 | `src/mcp/server.ts`・`src/mcp/services.ts`・`src/mcp/tool-error.ts` | ツールの登録・引数・サーフェスの検査・Observation の検証・エラー応答 |
 | `src/core/read/compiler.ts`・`src/core/read/allocator.ts`・`src/core/types.ts` | compile の選び方・出力の形・delivery・notices |
 | `src/core/store/database.ts`・`src/core/store/snapshot-pruning.ts` | DB ファイル・ロック・一時ファイル・snapshot の保持と圧縮 |
-| `src/core/optimization/staleness.ts`・`src/core/optimization/repo-file-listing.ts`・`src/core/optimization/staleness-ack.ts`・`src/core/automation/approve-pending.ts` | フォーク固有の振る舞い |
+| `src/core/optimization/staleness.ts`・`src/core/optimization/repo-file-listing.ts`・`src/core/optimization/staleness-ack.ts`・`src/core/optimization/staleness-report.ts`・`src/core/automation/approve-pending.ts` | フォーク固有の振る舞い |
 | `src/core/source-sync-staleness.ts`・`src/core/project-share/`・`src/adapters/`・`src/expansion/models.ts` | reconcile の notices・共有ファイル・アダプタの配布先・モデル |
 | `package.json` | パッケージ名・版・Node.js の要件 |
 | `docs/adr/019-operations-lightening.md` | フォーク固有の振る舞いの決定の範囲 |

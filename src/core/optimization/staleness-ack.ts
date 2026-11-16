@@ -9,13 +9,19 @@
  */
 
 import type { Repository } from '../store/repository.js';
-import type { Document } from '../types.js';
-import { collectSemanticStalenessFindings } from './staleness.js';
+import { collectSemanticStalenessFindings, docSourcePathSet } from './staleness.js';
+import { buildStalenessReport, selectApprovedDocs } from './staleness-report.js';
 
 export interface StalenessAckOptions {
   /** Approved doc_ids to acknowledge, or null for every approved document. */
   docIds: readonly string[] | null;
   dryRun: boolean;
+  /**
+   * When set, acknowledge only documents whose every Level-3 finding is attributable to the commit range
+   * `baseRef..headRef` (headRef null = the working tree; see `staleness-report`). Others are skipped with
+   * `not_attributable`, documents without Level-3 findings with `no_findings`.
+   */
+  onlyAttributable?: { baseRef: string; headRef: string | null };
 }
 
 export interface StalenessAckDocResult {
@@ -26,7 +32,7 @@ export interface StalenessAckDocResult {
   baseline_path_count: number;
 }
 
-export type StalenessAckSkipReason = 'no_linked_paths' | 'source_unreadable';
+export type StalenessAckSkipReason = 'no_linked_paths' | 'source_unreadable' | 'not_attributable' | 'no_findings';
 
 export interface StalenessAckResult {
   dry_run: boolean;
@@ -34,16 +40,6 @@ export interface StalenessAckResult {
   skipped: Array<{ doc_id: string; reason: StalenessAckSkipReason }>;
   /** Archived (or, with dry_run, archivable) Level-3 `staleness_detected` observations. */
   archived_observations: number;
-}
-
-function selectDocs(approved: Document[], docIds: readonly string[] | null): Document[] {
-  if (docIds === null) return approved;
-  const byId = new Map(approved.map((d) => [d.doc_id, d]));
-  const unknown = docIds.filter((id) => !byId.has(id));
-  if (unknown.length > 0) {
-    throw new Error(`not approved documents: ${unknown.join(', ')}`);
-  }
-  return [...new Set(docIds)].map((id) => byId.get(id) as Document);
 }
 
 function countLevel3ByKind(
@@ -64,8 +60,9 @@ export function acknowledgeStaleness(
   projectRoot: string,
   options: StalenessAckOptions,
 ): StalenessAckResult {
-  const docs = selectDocs(repo.getApprovedDocuments(), options.docIds);
+  const docs = selectApprovedDocs(repo.getApprovedDocuments(), options.docIds);
   const edges = repo.getApprovedEdges();
+  const excludedLinkedPaths = docSourcePathSet(repo.getApprovedDocuments());
 
   // Pass 1: what the current baselines report (read-only).
   const before = collectSemanticStalenessFindings({
@@ -74,6 +71,7 @@ export function acknowledgeStaleness(
     projectRoot,
     getBaseline: (id) => repo.getStalenessBaseline(id),
     persistLevel3Baselines: false,
+    excludedLinkedPaths,
   });
   // Pass 2: a baseline is captured for every doc whose previous baseline reads as absent.
   const recaptured = collectSemanticStalenessFindings({
@@ -82,11 +80,22 @@ export function acknowledgeStaleness(
     projectRoot,
     getBaseline: () => null,
     persistLevel3Baselines: true,
+    excludedLinkedPaths,
   });
 
   const findingsByDoc = countLevel3ByKind(before.findings);
   const unreadable = new Set(before.findings.filter((f) => f.kind === 'source_unreadable').map((f) => f.doc_id));
   const upsertByDoc = new Map(recaptured.baselineUpserts.map((u) => [u.doc_id, u.fingerprint_json]));
+  const attribution =
+    options.onlyAttributable === undefined
+      ? null
+      : new Map(
+          buildStalenessReport(repo, projectRoot, {
+            docIds: docs.map((d) => d.doc_id),
+            baseRef: options.onlyAttributable.baseRef,
+            headRef: options.onlyAttributable.headRef,
+          }).documents.map((d) => [d.doc_id, d.all_attributable]),
+        );
 
   const acknowledged: StalenessAckDocResult[] = [];
   const skipped: StalenessAckResult['skipped'] = [];
@@ -98,6 +107,13 @@ export function acknowledgeStaleness(
         reason: unreadable.has(doc.doc_id) ? 'source_unreadable' : 'no_linked_paths',
       });
       continue;
+    }
+    if (attribution !== null) {
+      const allAttributable = attribution.get(doc.doc_id);
+      if (allAttributable !== true) {
+        skipped.push({ doc_id: doc.doc_id, reason: allAttributable === false ? 'not_attributable' : 'no_findings' });
+        continue;
+      }
     }
     acknowledged.push({
       doc_id: doc.doc_id,

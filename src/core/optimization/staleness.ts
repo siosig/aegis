@@ -97,7 +97,17 @@ function isTsLike(relPosix: string): boolean {
   return lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts');
 }
 
-function fingerprintLinkedFile(projectRoot: string, relPosix: string): string | null {
+/** Level-3 fingerprint of a linked file's bytes: exported symbols for TS-like paths, raw bytes otherwise. */
+export function fingerprintBytes(relPosix: string, body: Buffer): string {
+  if (isTsLike(relPosix)) {
+    const syms = extractTsExportedSymbols(body.toString('utf-8'));
+    return `sym:${createHash('sha256').update(syms.join('\n')).digest('hex')}`;
+  }
+  return `raw:${createHash('sha256').update(body).digest('hex')}`;
+}
+
+/** Fingerprint of the working-tree file at a repo-relative posix path, or null when absent or unreadable. */
+export function fingerprintLinkedFile(projectRoot: string, relPosix: string): string | null {
   let absPath: string;
   try {
     absPath = resolveSourcePath(relPosix, projectRoot);
@@ -106,14 +116,7 @@ function fingerprintLinkedFile(projectRoot: string, relPosix: string): string | 
   }
   if (!existsSync(absPath)) return null;
   try {
-    const body = readFileSync(absPath);
-    if (isTsLike(relPosix)) {
-      const txt = body.toString('utf-8');
-      const syms = extractTsExportedSymbols(txt);
-      const joined = syms.join('\n');
-      return `sym:${createHash('sha256').update(joined).digest('hex')}`;
-    }
-    return `raw:${createHash('sha256').update(body).digest('hex')}`;
+    return fingerprintBytes(relPosix, readFileSync(absPath));
   } catch {
     return null;
   }
@@ -132,6 +135,18 @@ export function linkedPathsForMultiSourceStaleness(doc: Pick<Document, 'source_p
   const raw = doc.source_path != null ? String(doc.source_path).trim() : '';
   if (raw === '') return fromRefs;
   return mergeSortedUniquePaths(fromRefs, [toPosix(raw)]);
+}
+
+/** Source paths (`source_path` plus `source_refs_json` assets) of every approved document, as posix paths. */
+export function docSourcePathSet(
+  docs: ReadonlyArray<Pick<Document, 'status' | 'source_path' | 'source_refs_json'>>,
+): Set<string> {
+  const set = new Set<string>();
+  for (const doc of docs) {
+    if (doc.status !== 'approved') continue;
+    for (const p of linkedPathsForMultiSourceStaleness(doc)) set.add(p);
+  }
+  return set;
 }
 
 function mergeSortedUniquePaths(a: string[], b: string[]): string[] {
@@ -241,6 +256,14 @@ export interface SemanticStalenessScanInput {
    * Dry-run maintenance should pass false so SQLite rows are not written.
    */
   persistLevel3Baselines: boolean;
+  /**
+   * Repo-relative posix paths dropped from edge-linked Level-3 fingerprints (normally {@link docSourcePathSet} of
+   * every approved document). A document body change is Level 1 of that document; counting it again as Level 3 of
+   * each doc whose edge glob matches `docs/**` left findings after every docs commit. A multi-source doc's own
+   * `source_refs_json` / `source_path` stay fingerprinted. Baseline keys in this set that are no longer linked are
+   * ignored, so baselines captured before the exclusion converge on the next no-drift refresh.
+   */
+  excludedLinkedPaths: ReadonlySet<string>;
 }
 
 export interface SemanticStalenessScanStats {
@@ -367,9 +390,10 @@ export function collectSemanticStalenessFindings(input: SemanticStalenessScanInp
     const refPathsForMulti = linkedPathsForMultiSourceStaleness(doc);
     if (!pathRequiresTarget && !(multiSource && refPathsForMulti.length > 0)) continue;
 
-    const linked = multiSource
-      ? mergeSortedUniquePaths(linkedPathsForDoc(doc.doc_id, input.edges, sortedFiles), refPathsForMulti)
-      : linkedPathsForDoc(doc.doc_id, input.edges, sortedFiles);
+    const edgeLinked = linkedPathsForDoc(doc.doc_id, input.edges, sortedFiles).filter(
+      (p) => !input.excludedLinkedPaths.has(p),
+    );
+    const linked = multiSource ? mergeSortedUniquePaths(edgeLinked, refPathsForMulti) : edgeLinked;
 
     if (linked.length === 0) continue;
     const linkedSet = new Set(linked);
@@ -395,7 +419,10 @@ export function collectSemanticStalenessFindings(input: SemanticStalenessScanInp
       continue;
     }
 
-    const keys = new Set([...Object.keys(prevObj), ...Object.keys(currentMap)]);
+    const keys = new Set([
+      ...Object.keys(prevObj).filter((k) => linkedSet.has(k) || !input.excludedLinkedPaths.has(k)),
+      ...Object.keys(currentMap),
+    ]);
     const sortedKeys = [...keys].sort((a, b) => a.localeCompare(b));
     // Baseline paths the current listing can never contain (git-ignored or in a skipped directory) are out of
     // scope, even when deleted: e.g. a baseline captured by the pre-git directory walk still holds `.venv/` files.

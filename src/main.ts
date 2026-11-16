@@ -24,6 +24,9 @@
  *   npx aegis approve-pending --types new_doc,add_edge
  *   npx aegis staleness-ack --doc-ids a,b        # Accept reviewed Level-3 drift: re-capture baselines (admin CLI only)
  *   npx aegis staleness-ack --all --dry-run      # List what would be acknowledged (no writes)
+ *   npx aegis staleness-ack --all --only-attributable --base-ref <sha> --head-ref HEAD
+ *                                                # Acknowledge only drift the commit range fully explains
+ *   npx aegis staleness-report --base-ref HEAD   # JSON: Level-3 findings with commit-range attribution (read-only)
  *   npx aegis edges --json                       # JSON: approved edges with target source_path (read-only; no lock, no writes)
  *   npx aegis resolve src/a.ts docs/b.md         # JSON: per-path base documents as compile_context would route them (read-only)
  *   npx aegis resolve --db path/to/aegis.db -- -odd-name.ts
@@ -69,7 +72,7 @@ const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { createProcessAdminCliIo, isAdminCliSubcommand, runAdminCli } from './cli/admin-commands.js';
-import { createProcessCliIo, runEdgesCli, runResolveCli } from './cli/read-commands.js';
+import { createProcessCliIo, runEdgesCli, runResolveCli, runStalenessReportCli } from './cli/read-commands.js';
 import { parseProposalTypesOption } from './core/automation/approve-pending.js';
 import { DEFAULT_DB_DIR, formatDormantStartupMessage, resolveServerStartupMode } from './core/init/install-marker.js';
 import { shareHydrate } from './core/project-share/hydrate.js';
@@ -629,9 +632,14 @@ export interface StalenessAckCli {
   /** null means `--all`. */
   docIds: string[] | null;
   dryRun: boolean;
+  /** Set by `--only-attributable --base-ref <ref> [--head-ref <ref>]`. */
+  onlyAttributable?: { baseRef: string; headRef: string | null };
 }
 
-/** Parses `staleness-ack` arguments strictly: exactly one of `--doc-ids` / `--all`; unknown flags throw. */
+/**
+ * Parses `staleness-ack` arguments strictly: exactly one of `--doc-ids` / `--all`; unknown flags throw.
+ * `--base-ref` / `--head-ref` are accepted only with `--only-attributable`, which requires `--base-ref`.
+ */
 export function parseStalenessAckCli(args: string[]): StalenessAckCli {
   let projectRoot = resolve(process.cwd());
   let customDbPath: string | undefined;
@@ -640,6 +648,9 @@ export function parseStalenessAckCli(args: string[]): StalenessAckCli {
   let docIds: string[] | undefined;
   let all = false;
   let dryRun = false;
+  let onlyAttributable = false;
+  let baseRef: string | undefined;
+  let headRef: string | undefined;
 
   const takeValue = (flag: string, index: number): string => {
     const value = args[index + 1];
@@ -657,6 +668,17 @@ export function parseStalenessAckCli(args: string[]): StalenessAckCli {
         break;
       case '--all':
         all = true;
+        break;
+      case '--only-attributable':
+        onlyAttributable = true;
+        break;
+      case '--base-ref':
+        baseRef = takeValue(flag, i);
+        i++;
+        break;
+      case '--head-ref':
+        headRef = takeValue(flag, i);
+        i++;
         break;
       case '--doc-ids':
         docIds = takeValue(flag, i)
@@ -690,6 +712,12 @@ export function parseStalenessAckCli(args: string[]): StalenessAckCli {
   if (all === (docIds !== undefined)) {
     throw new Error('specify exactly one of --doc-ids <id1,id2,...> or --all');
   }
+  if (onlyAttributable && baseRef === undefined) {
+    throw new Error('--only-attributable requires --base-ref <ref>');
+  }
+  if (!onlyAttributable && (baseRef !== undefined || headRef !== undefined)) {
+    throw new Error('--base-ref / --head-ref require --only-attributable');
+  }
 
   return {
     projectRoot,
@@ -698,6 +726,7 @@ export function parseStalenessAckCli(args: string[]): StalenessAckCli {
     extraTemplateDirs,
     docIds: docIds ?? null,
     dryRun,
+    ...(onlyAttributable ? { onlyAttributable: { baseRef: baseRef as string, headRef: headRef ?? null } } : {}),
   };
 }
 
@@ -719,7 +748,10 @@ async function handleStalenessAck(): Promise<void> {
     const db = await createDatabase(cli.dbPath);
     const repo = new Repository(db);
     const service = new AegisService(repo, cli.templatesRoot, null, cli.extraTemplateDirs, false, cli.projectRoot);
-    const result = service.ackStaleness({ docIds: cli.docIds, dryRun: cli.dryRun }, 'admin');
+    const result = service.ackStaleness(
+      { docIds: cli.docIds, dryRun: cli.dryRun, onlyAttributable: cli.onlyAttributable },
+      'admin',
+    );
     console.log(JSON.stringify(result, null, 2));
     console.error(
       `[aegis] staleness-ack: acknowledged=${result.acknowledged.length} skipped=${result.skipped.length} archived_observations=${result.archived_observations} (dry_run=${result.dry_run})`,
@@ -1144,6 +1176,11 @@ async function main() {
 
   if (subcommand === 'resolve') {
     process.exitCode = await runResolveCli(process.argv.slice(3), createProcessCliIo(), process.cwd());
+    return;
+  }
+
+  if (subcommand === 'staleness-report') {
+    process.exitCode = await runStalenessReportCli(process.argv.slice(3), createProcessCliIo(), process.cwd());
     return;
   }
 

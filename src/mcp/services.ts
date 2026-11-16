@@ -50,6 +50,7 @@ import {
 import type { SemanticStalenessScanStats } from '../core/optimization/index.js';
 import {
   collectSemanticStalenessFindings,
+  docSourcePathSet,
   SEMANTIC_STALENESS_ALGORITHM_VERSION,
 } from '../core/optimization/staleness.js';
 import {
@@ -827,12 +828,14 @@ export class AegisService {
 
     const nowMs = Date.now();
 
+    const approvedDocs = this.repo.getApprovedDocuments();
     const semantic_scan = collectSemanticStalenessFindings({
-      docs: this.repo.getApprovedDocuments(),
+      docs: approvedDocs,
       edges: this.repo.getApprovedEdges(),
       projectRoot: this.projectRoot,
       getBaseline: (id) => this.repo.getStalenessBaseline(id),
       persistLevel3Baselines: !dryRun,
+      excludedLinkedPaths: docSourcePathSet(approvedDocs),
     });
 
     if (!dryRun) {
@@ -1837,6 +1840,7 @@ export class AegisService {
         projectRoot: this.projectRoot,
         getBaseline: (id) => this.repo.getStalenessBaseline(id),
         persistLevel3Baselines: true,
+        excludedLinkedPaths: docSourcePathSet(this.repo.getApprovedDocuments()),
       });
       for (const u of semantic_scan.baselineUpserts) {
         this.repo.upsertStalenessBaseline(u.doc_id, u.fingerprint_json);

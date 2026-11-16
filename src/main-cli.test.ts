@@ -1079,7 +1079,52 @@ describe('CLI — staleness-ack (dist/main.js)', () => {
     expect(runCli([...base, '--all', '--bogus']).status).toBe(2);
     expect(runCli([...base, '--doc-ids']).status).toBe(2);
     expect(runCli([...base, '--doc-ids', ',']).status).toBe(2);
+    expect(runCli([...base, '--all', '--only-attributable']).status).toBe(2);
+    expect(runCli([...base, '--all', '--base-ref', 'HEAD']).status).toBe(2);
+    expect(runCli([...base, '--all', '--head-ref', 'HEAD']).status).toBe(2);
   }, 30_000);
+
+  it('--only-attributable acknowledges the drift a commit range explains; staleness-report shows it', () => {
+    const git = (...args: string[]) => {
+      const r = spawnSync(
+        'git',
+        ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...args],
+        { cwd: root, encoding: 'utf-8' },
+      );
+      expect(r.status, `git ${args.join(' ')}: ${r.stderr}`).toBe(0);
+      return r.stdout.trim();
+    };
+    writeFileSync(join(root, '.gitignore'), '.aegis/\n', 'utf-8');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'c0');
+    const c0 = git('rev-parse', 'HEAD');
+    expect(runCli(['maintenance', '--project-root', root]).status).toBe(0);
+    writeFileSync(join(root, 'src', 'a.ts'), 'export function A2() {}\n', 'utf-8');
+    git('commit', '-q', '-am', 'c1');
+
+    const report = runCli(['staleness-report', '--project-root', root, '--base-ref', c0, '--head-ref', 'HEAD']);
+    expect(report.status, report.stderr).toBe(0);
+    const parsed = JSON.parse(report.stdout) as { documents: Array<{ doc_id: string; all_attributable: boolean }> };
+    expect(parsed.documents.map((d) => [d.doc_id, d.all_attributable])).toEqual([['doc-a', true]]);
+
+    const ack = runCli([
+      'staleness-ack',
+      '--project-root',
+      root,
+      '--all',
+      '--only-attributable',
+      '--base-ref',
+      c0,
+      '--head-ref',
+      'HEAD',
+    ]);
+    expect(ack.status, ack.stderr).toBe(0);
+    expect(
+      (JSON.parse(ack.stdout) as { acknowledged: Array<{ doc_id: string }> }).acknowledged.map((a) => a.doc_id),
+    ).toEqual(['doc-a']);
+    const after = runCli(['staleness-report', '--project-root', root, '--base-ref', 'HEAD']);
+    expect(JSON.parse(after.stdout)).toMatchObject({ documents: [] });
+  }, 60_000);
 
   it('exits 2 for a doc_id that is not an approved document', () => {
     const r = runCli(['staleness-ack', '--project-root', root, '--doc-ids', 'nope']);
